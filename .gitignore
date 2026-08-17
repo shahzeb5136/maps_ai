@@ -1,0 +1,20 @@
+# Secrets — never commit these. The keys go in Railway service variables.
+.env
+.env.local
+*.pem
+
+# Local scan output (on Railway this lives on the mounted volume)
+data/
+property_scans/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.DS_Store
+.idea/
+.vscode/

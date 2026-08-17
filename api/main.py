@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from scanner import config as scanner_config
 
-from . import config, db, storage, worker
+from . import auth, config, db, storage, worker
 from .auth import current_user
 
 logging.basicConfig(
@@ -129,11 +129,28 @@ def _detail(row) -> ScanDetail:
 # ── Routes ───────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
+    """
+    Liveness plus a config self-check. Everything reported here is
+    non-sensitive — an issuer URL, an origin list, a row count — and it turns
+    the three misconfigurations that actually happen (wrong Clerk instance,
+    unmounted volume, wrong database) into something you can see in one curl
+    instead of inferring from a 401.
+    """
+    db_ok, db_error, user_rows = True, None, None
+    try:
+        user_rows = await db.pool().fetchval("SELECT count(*) FROM users")
+    except Exception as exc:
+        db_ok, db_error = False, str(exc)[:200]
+
     return {
         "status": "ok",
         "service": "property-scanner",
         "credit_cost": config.CREDIT_COST,
         "storage_writable": os.access(config.STORAGE_DIR, os.W_OK),
+        "public_base_url": config.PUBLIC_BASE_URL or "(derived per-request)",
+        "allowed_origins": config.ALLOWED_ORIGINS,
+        "clerk": {"issuer": config.CLERK_ISSUER or None, **auth.probe_jwks()},
+        "database": {"connected": db_ok, "user_rows": user_rows, "error": db_error},
     }
 
 

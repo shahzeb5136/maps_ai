@@ -13,6 +13,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
+from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
 
 from . import config
 
@@ -55,11 +56,24 @@ def verify_token(token: str) -> str:
     except jwt.ExpiredSignatureError:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                             "Session expired. Refresh the page and try again.")
+    except PyJWKClientConnectionError as exc:
+        # We could not reach Clerk. Genuinely our problem, so don't blame the
+        # caller with a 401 they can do nothing about.
+        log.error("JWKS fetch failed for %s: %s", config.CLERK_JWKS_URL, exc)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "Authentication is temporarily unavailable.")
+    except PyJWKClientError as exc:
+        # Reached Clerk but the token's `kid` is absent or unknown to the key
+        # set — a bad token, not an outage. Note this is NOT a subclass of
+        # InvalidTokenError, so it needs its own arm or it lands in 503.
+        log.warning("Rejected token (key lookup): %s", exc)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid session token.")
     except jwt.InvalidTokenError as exc:
+        # Includes InvalidIssuerError — the usual symptom of a CLERK_ISSUER that
+        # doesn't match the instance the website authenticates against.
         log.warning("Rejected token: %s", exc)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid session token.")
     except Exception as exc:
-        # A JWKS fetch failure is ours, not the caller's — don't report it as 401.
         log.exception("Token verification failed: %s", exc)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "Authentication is temporarily unavailable.")
@@ -68,6 +82,21 @@ def verify_token(token: str) -> str:
     if not user_id:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token has no subject.")
     return user_id
+
+
+def probe_jwks() -> dict:
+    """
+    Diagnostic for /health: can we actually fetch the key set, and how many
+    keys did we get? A misconfigured CLERK_ISSUER is otherwise invisible until
+    a real user hits a 401 they can't explain.
+    """
+    if not config.CLERK_JWKS_URL:
+        return {"configured": False, "reachable": False, "error": "CLERK_ISSUER not set"}
+    try:
+        keys = _client().get_jwk_set().keys
+        return {"configured": True, "reachable": True, "keys": len(keys)}
+    except Exception as exc:
+        return {"configured": True, "reachable": False, "error": str(exc)[:200]}
 
 
 async def current_user(

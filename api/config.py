@@ -21,13 +21,28 @@ def _env(name: str, default: str = "") -> str:
 DATABASE_URL: str = _env("DATABASE_URL")
 
 # ── Clerk ────────────────────────────────────────────────────────────────────
-# Session tokens are verified against Clerk's public JWKS. CLERK_ISSUER is the
-# `iss` claim of a real token, e.g. https://clerk.your-domain.com — find it in
-# Clerk → Configure → API keys → "Frontend API URL".
-CLERK_ISSUER: str = _env("CLERK_ISSUER").rstrip("/")
-CLERK_JWKS_URL: str = _env("CLERK_JWKS_URL") or (
-    f"{CLERK_ISSUER}/.well-known/jwks.json" if CLERK_ISSUER else ""
-)
+# Session tokens are verified against Clerk's public JWKS. Each issuer is the
+# `iss` claim of a real token — Clerk → Configure → API keys → "Frontend API
+# URL", which is also recoverable by base64-decoding a pk_ publishable key.
+#
+# Comma-separated, because one deployment of this service serves more than one
+# Clerk instance: the live site runs on a production instance
+# (https://clerk.your-domain.com) while local development runs on a development
+# one (https://something-00.clerk.accounts.dev). A token is accepted only if
+# its issuer is on this list AND its signature checks out against that
+# issuer's own key set.
+CLERK_ISSUERS: List[str] = [
+    i.strip().rstrip("/") for i in _env("CLERK_ISSUER").split(",") if i.strip()
+]
+
+
+def jwks_url_for(issuer: str) -> str:
+    """Where a given issuer publishes its keys. CLERK_JWKS_URL overrides this,
+    but only makes sense when a single issuer is configured."""
+    override = _env("CLERK_JWKS_URL")
+    if override and len(CLERK_ISSUERS) == 1:
+        return override
+    return f"{issuer}/.well-known/jwks.json"
 
 # ── Storage ──────────────────────────────────────────────────────────────────
 # Point this at the Railway volume mount path. Scans are large (5-10 images
@@ -73,7 +88,7 @@ def validate() -> None:
     missing = [
         name for name, value in (
             ("DATABASE_URL", DATABASE_URL),
-            ("CLERK_JWKS_URL (or CLERK_ISSUER)", CLERK_JWKS_URL),
+            ("CLERK_ISSUER", CLERK_ISSUERS),
             ("SIGNING_SECRET", SIGNING_SECRET),
         ) if not value
     ]

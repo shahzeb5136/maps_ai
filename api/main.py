@@ -149,7 +149,7 @@ async def health():
         "storage_writable": os.access(config.STORAGE_DIR, os.W_OK),
         "public_base_url": config.PUBLIC_BASE_URL or "(derived per-request)",
         "allowed_origins": config.ALLOWED_ORIGINS,
-        "clerk": {"issuer": config.CLERK_ISSUER or None, **auth.probe_jwks()},
+        "clerk": auth.probe_jwks(),
         "database": {"connected": db_ok, "user_rows": user_rows, "error": db_error},
     }
 

@@ -109,7 +109,7 @@ Service → **Variables** → **Raw Editor**:
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 MAPS_API_KEY=<your Google Maps key>
 GEMINI_API_KEY=<your Gemini key>
-CLERK_ISSUER=https://clerk.your-domain.com
+CLERK_ISSUER=https://clerk.your-domain.com,https://your-instance-00.clerk.accounts.dev
 SIGNING_SECRET=<openssl rand -hex 32>
 STORAGE_DIR=/data
 ALLOWED_ORIGINS=https://your-website.com,http://localhost:3000
@@ -123,10 +123,14 @@ Notes:
   than pasting a URL, so it follows the plugin if credentials rotate. It must
   be the *same* Postgres the website uses, or the wallet won't match.
 - **`CLERK_ISSUER`** — Clerk dashboard → **Configure → API keys → Frontend API
-  URL**. It's the `iss` claim on the tokens the site sends, e.g.
-  `https://clerk.yourdomain.com` in production or
-  `https://xxx-yy-00.clerk.accounts.dev` on a dev instance. Get this wrong and
-  every request 401s.
+  URL**. It's the `iss` claim on the tokens the site sends. **Comma-separated,
+  and you almost certainly need two of them:** the deployed site authenticates
+  against your production Clerk instance (`https://clerk.yourdomain.com`, from
+  a `pk_live_` key) while `npm run dev` uses a development instance
+  (`https://xxx-yy-00.clerk.accounts.dev`, from `pk_test_`). They sign with
+  different keys, so listing only one makes the other 401 on every request with
+  "Invalid session token". `/health` lists every configured issuer and whether
+  its key set actually fetches.
 - **`SIGNING_SECRET`** — any long random string. Changing it later invalidates
   every outstanding image and PDF link (they regenerate on the next page load,
   so it's survivable, just don't rotate it casually).

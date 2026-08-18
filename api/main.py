@@ -17,7 +17,11 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+# Starlette's UploadFile, not FastAPI's: the form parser produces the former,
+# and FastAPI's is a *subclass*, so isinstance against it silently misses
+# every real upload.
+from starlette.datastructures import UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -176,20 +180,82 @@ async def list_scans(
     }
 
 
-@app.post("/api/scans", response_model=SubmitResponse, status_code=status.HTTP_201_CREATED)
-async def submit_scan(
-    address: str = Form(...),
-    images: List[UploadFile] = File(default=[]),
-    user_id: str = Depends(current_user),
-):
+async def _read_submission(request: Request) -> tuple[str, List[UploadFile]]:
+    """
+    Pull the address and any attachments out of the request.
+
+    Accepts multipart (address + images) and plain JSON ({"address": ...}).
+
+    The JSON form exists because the website and this service deploy
+    independently — Vercel and Railway are never in step — so there is always a
+    window where one is newer than the other. Reading both shapes means that
+    window is uneventful instead of a stream of 422s on the live site. It costs
+    a dozen lines; a deploy-order dependency between two separately hosted
+    services costs an outage every time.
+    """
+    content_type = request.headers.get("content-type", "").lower()
+
+    if content_type.startswith("application/json"):
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Could not read the request body.")
+        if not isinstance(body, dict):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                "Expected an object with an 'address'.")
+        return str(body.get("address") or ""), []
+
+    try:
+        form = await request.form()
+    except Exception:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Could not read the submitted form.")
+
+    # getlist so one field name can carry several files; plain text fields
+    # sharing the name are not uploads and are skipped.
+    files = [f for f in form.getlist("images") if isinstance(f, UploadFile)]
+    return str(form.get("address") or ""), files
+
+
+@app.post("/api/scans", response_model=SubmitResponse, status_code=status.HTTP_201_CREATED,
+          openapi_extra={
+              "requestBody": {
+                  "required": True,
+                  "content": {
+                      "multipart/form-data": {
+                          "schema": {
+                              "type": "object",
+                              "required": ["address"],
+                              "properties": {
+                                  "address": {"type": "string"},
+                                  "images": {
+                                      "type": "array",
+                                      "items": {"type": "string", "format": "binary"},
+                                  },
+                              },
+                          }
+                      },
+                      "application/json": {
+                          "schema": {
+                              "type": "object",
+                              "required": ["address"],
+                              "properties": {"address": {"type": "string"}},
+                          }
+                      },
+                  },
+              }
+          })
+async def submit_scan(request: Request, user_id: str = Depends(current_user)):
     """
     Queue a scan, optionally with the owner's own photographs.
 
-    Multipart rather than JSON so the address and the attachments arrive
-    together — one request, one charge, no half-created scan waiting for files
-    that never come.
+    Multipart keeps the address and its attachments in one request — one
+    charge, and no half-created scan waiting on files that never arrive. A
+    JSON body without attachments is also accepted; see `_read_submission`.
     """
-    address = clean_address(address)
+    raw_address, images = await _read_submission(request)
+    address = clean_address(raw_address)
 
     # Attachments are validated and re-encoded BEFORE the credit is taken, so a
     # rejected photo costs nothing and leaves nothing on the volume.

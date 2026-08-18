@@ -23,6 +23,7 @@ Written to `$STORAGE_DIR/scans/<scan_id>/`:
 | `street_facade_front.jpg` + 3 flanks | Street View orbit aimed at the building |
 | `timeline_YYYY_MM.jpg` | One frame per historical Street View capture |
 | `reno_before.jpg` / `reno_after_N.jpg` | Before/after pairs, one per concept |
+| `owner_photo_N.jpg` | Photos the user attached, re-encoded on upload |
 | `report.json` | The full structured payload |
 | `report.pdf` | The downloadable report |
 
@@ -37,7 +38,7 @@ time-limited URLs, because `<img src>` and download links cannot send an
 | `GET` | `/health` | Liveness. No auth. |
 | `GET` | `/api/credits` | Wallet balance |
 | `GET` | `/api/scans` | The caller's scans, newest first |
-| `POST` | `/api/scans` | `{address}` → charges 1 credit, queues the scan |
+| `POST` | `/api/scans` | multipart `address` + optional `images[]` → charges 1 credit, queues the scan |
 | `GET` | `/api/scans/{id}` | One scan; `result` carries signed URLs once complete |
 | `DELETE` | `/api/scans/{id}` | Removes the row and its files |
 | `GET` | `/api/scans/{id}/files/{name}` | Signed artifact. No bearer token. |
@@ -45,8 +46,36 @@ time-limited URLs, because `<img src>` and download links cannot send an
 Everything except `/health` and the signed file route needs
 `Authorization: Bearer <clerk session jwt>`.
 
-`POST /api/scans` returns **402** when the wallet is short and **409** when the
-user already has a scan running.
+`POST /api/scans` returns **402** when the wallet is short, **409** when the
+user already has a scan running, and **422** when an attachment is rejected.
+
+## Owner-supplied photos
+
+Up to `MAX_UPLOAD_IMAGES` (default 6) images can ride along with the address.
+They are analysed beside the Google imagery and appear in both the web report
+and the PDF.
+
+Nothing is stored as uploaded. Every attachment is decoded, bounded, and
+re-encoded to a JPEG under a name we chose (`owner_photo_N.jpg`), which handles
+attacker-controlled filenames, polyglot files, decompression bombs and EXIF —
+including the GPS coordinates phones habitually embed — in one step. EXIF
+*orientation* is applied before the metadata is dropped, so portrait photos are
+not analysed sideways.
+
+Validation happens **before** the credit is charged, so a rejected photo costs
+nothing.
+
+Two behaviours worth knowing:
+
+- The model is told which images the owner supplied, to prefer them where they
+  disagree with a possibly-stale Street View capture, and not to treat the
+  absence of a defect in a photo the owner chose as evidence the defect is
+  absent.
+- Facade selection for the renovation concepts still prefers Street View, whose
+  consistent framing is what lets the image model hold the camera steady
+  between before and after. An owner photo is the fallback — which is why a
+  property Google has never driven past can now get renovation concepts and a
+  non-`Low` confidence rating at all.
 
 ## Credits
 
@@ -115,6 +144,8 @@ STORAGE_DIR=/data
 ALLOWED_ORIGINS=https://your-website.com,http://localhost:3000
 SCAN_CREDIT_COST=1
 MAX_CONCURRENT_SCANS=2
+MAX_UPLOAD_IMAGES=6
+MAX_UPLOAD_MB=12
 ```
 
 Notes:

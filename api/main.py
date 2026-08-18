@@ -17,14 +17,14 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel
 
 from scanner import config as scanner_config
 
-from . import auth, config, db, storage, worker
+from . import auth, config, db, storage, uploads, worker
 from .auth import current_user
 
 logging.basicConfig(
@@ -61,22 +61,25 @@ app.add_middleware(
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
-class ScanRequest(BaseModel):
-    address: str = Field(min_length=3, max_length=300)
-
-    @field_validator("address")
-    @classmethod
-    def _clean(cls, v: str) -> str:
-        v = " ".join(v.split())
-        if not v:
-            raise ValueError("Address cannot be empty")
-        return v
+def clean_address(raw: str) -> str:
+    """Collapse whitespace and bound the length. Multipart form fields are
+    plain strings, so this replaces what a pydantic body model used to do."""
+    value = " ".join((raw or "").split())
+    if len(value) < 3:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "Enter an address with at least 3 characters.")
+    if len(value) > 300:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "That address is too long.")
+    return value
 
 
 class ScanSummary(BaseModel):
     id: str
     address: str
     status: str
+    #: How many owner-supplied photos were attached to this scan.
+    owner_photos: int = 0
     stage: Optional[str] = None
     stage_detail: Optional[str] = None
     credits_spent: int
@@ -108,6 +111,7 @@ def _summary(row) -> ScanSummary:
         stage=row["stage"],
         stage_detail=row["stage_detail"],
         credits_spent=row["credits_spent"],
+        owner_photos=row["owner_photos"] if "owner_photos" in row.keys() else 0,
         error_message=row["error_message"],
         created_at=_iso(row["created_at"]) or "",
         started_at=_iso(row["started_at"]),
@@ -173,11 +177,33 @@ async def list_scans(
 
 
 @app.post("/api/scans", response_model=SubmitResponse, status_code=status.HTTP_201_CREATED)
-async def submit_scan(body: ScanRequest, user_id: str = Depends(current_user)):
+async def submit_scan(
+    address: str = Form(...),
+    images: List[UploadFile] = File(default=[]),
+    user_id: str = Depends(current_user),
+):
+    """
+    Queue a scan, optionally with the owner's own photographs.
+
+    Multipart rather than JSON so the address and the attachments arrive
+    together — one request, one charge, no half-created scan waiting for files
+    that never come.
+    """
+    address = clean_address(address)
+
+    # Attachments are validated and re-encoded BEFORE the credit is taken, so a
+    # rejected photo costs nothing and leaves nothing on the volume.
+    try:
+        attachments = await uploads.collect(images)
+    except uploads.UploadRejected as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+
     # The check, the charge and the row all happen in one transaction — see
     # db.begin_scan. Nothing is queued unless the credit was actually taken.
     try:
-        scan_id, remaining = await db.begin_scan(user_id, body.address, config.CREDIT_COST)
+        scan_id, remaining = await db.begin_scan(
+            user_id, address, config.CREDIT_COST, owner_photos=len(attachments)
+        )
     except db.ScanAlreadyRunning:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -189,7 +215,20 @@ async def submit_scan(body: ScanRequest, user_id: str = Depends(current_user)):
             f"This scan costs {config.CREDIT_COST} credit. You don't have enough.",
         )
 
-    worker.submit(scan_id, user_id, body.address)
+    # Past the charge, so any failure here has to hand the credit back itself —
+    # the worker that normally does that has not been started yet.
+    try:
+        names = uploads.write(attachments, storage.scan_dir(scan_id))
+    except Exception as exc:
+        log.exception("Could not store attachments for scan %s: %s", scan_id, exc)
+        await db.mark_failed(scan_id, "Could not store the attached photos. "
+                                      "Your credit has been refunded.")
+        await db.refund_credits(scan_id, user_id, config.CREDIT_COST)
+        storage.delete_scan_files(scan_id)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            "Could not store the attached photos. No credit was charged.")
+
+    worker.submit(scan_id, user_id, address, names)
 
     row = await db.get_scan(scan_id, user_id)
     return SubmitResponse(scan=_summary(row), credits_remaining=remaining)

@@ -85,6 +85,7 @@ async def _migrate(p: asyncpg.Pool) -> None:
               stage         TEXT,
               stage_detail  TEXT,
               credits_spent INTEGER NOT NULL DEFAULT 0,
+              owner_photos  INTEGER NOT NULL DEFAULT 0,
               refunded      BOOLEAN NOT NULL DEFAULT FALSE,
               error_message TEXT,
               result_json   JSONB,
@@ -92,6 +93,11 @@ async def _migrate(p: asyncpg.Pool) -> None:
               started_at    TIMESTAMPTZ,
               completed_at  TIMESTAMPTZ
             )
+        """)
+        # Added after launch, so existing deployments need it backfilled.
+        await con.execute("""
+            ALTER TABLE property_scans
+            ADD COLUMN IF NOT EXISTS owner_photos INTEGER NOT NULL DEFAULT 0
         """)
         await con.execute("""
             CREATE INDEX IF NOT EXISTS property_scans_user_created_idx
@@ -113,7 +119,8 @@ class ScanAlreadyRunning(Exception):
     """The user already has a scan in flight."""
 
 
-async def begin_scan(user_id: str, address: str, cost: int) -> tuple[str, int]:
+async def begin_scan(user_id: str, address: str, cost: int,
+                     owner_photos: int = 0) -> tuple[str, int]:
     """
     Charge for a scan and create its row, atomically.
 
@@ -154,10 +161,12 @@ async def begin_scan(user_id: str, address: str, cost: int) -> tuple[str, int]:
             await con.execute(
                 """
                 INSERT INTO property_scans (id, user_id, address, status, stage,
-                                            stage_detail, credits_spent, created_at)
-                VALUES ($1, $2, $3, $4, 'queued', 'Waiting for a worker', $5, $6)
+                                            stage_detail, credits_spent, created_at,
+                                            owner_photos)
+                VALUES ($1, $2, $3, $4, 'queued', 'Waiting for a worker', $5, $6, $7)
                 """,
                 scan_id, user_id, address, QUEUED, cost, datetime.now(timezone.utc),
+                owner_photos,
             )
 
     return scan_id, remaining
@@ -244,7 +253,7 @@ async def list_scans(user_id: str, limit: int = 50) -> List[asyncpg.Record]:
     return await pool().fetch(
         """
         SELECT id, user_id, address, status, stage, stage_detail, credits_spent,
-               error_message, created_at, started_at, completed_at
+               owner_photos, error_message, created_at, started_at, completed_at
         FROM property_scans
         WHERE user_id = $1
         ORDER BY created_at DESC

@@ -16,7 +16,7 @@ from google.genai import types
 from PIL import Image
 
 from . import config
-from .imagery import has_street_imagery
+from .imagery import OWNER_PREFIX, has_ground_imagery, has_owner_photos
 from .models import (
     PropertyInspectionReport,
     RenovationConcepts,
@@ -39,7 +39,13 @@ def analyze_property(address: str, images: Dict[str, Image.Image],
                      client: genai.Client) -> PropertyInspectionReport:
     contents: List[object] = []
     for label, img in images.items():
-        contents.append(f"Image Perspective: {label.replace('_', ' ').upper()}")
+        if label.startswith(OWNER_PREFIX):
+            contents.append(
+                f"Image Perspective: {label.replace('_', ' ').upper()} "
+                "(SUPPLIED BY THE PROPERTY OWNER)"
+            )
+        else:
+            contents.append(f"Image Perspective: {label.replace('_', ' ').upper()}")
         contents.append(img)
 
     contents.append(f"""
@@ -50,15 +56,31 @@ Supplied imagery:
 - Top-down satellite: parcel footprint, roof shape/area, pools, yard, detached structures, canopy.
 - Street View perspectives (if present): facade, story count, garage, siding, curb appeal,
   deferred maintenance.
+- Owner-supplied photographs (if present): taken deliberately by the owner, so they are
+  usually current and often show what the other sources cannot - close-up material
+  condition, elevations hidden from the road, damage, or recent work.
 
 Cross-reference overhead and horizontal views. Do not report features you cannot actually
 see. Set imagery_confidence honestly. Return strict JSON per the schema.
 """)
 
-    if not has_street_imagery(images):
+    if has_owner_photos(images):
         contents.append(
-            "NOTE: No street-level imagery is available. Assess ONLY what the overhead view "
-            "supports. Set imagery_confidence to 'Low', curb_appeal_score_1_to_10 to 1, and "
+            "NOTE ON OWNER PHOTOGRAPHS: these are the most recent and most detailed view "
+            "of the property, so prefer them over satellite or Street View wherever they "
+            "disagree - Street View captures can be years stale. Two cautions. They are "
+            "not independently verified and the owner chose what to photograph, so absence "
+            "of a defect in them is not evidence the defect is absent; keep basing "
+            "whole-property judgements on the full image set. And if an owner photo "
+            "plainly shows a different building from the satellite footprint, say so in "
+            "risk_factors_or_deferred_maintenance rather than silently reconciling them."
+        )
+
+    if not has_ground_imagery(images):
+        contents.append(
+            "NOTE: No ground-level imagery is available - neither Street View nor owner "
+            "photographs. Assess ONLY what the overhead view supports. Set "
+            "imagery_confidence to 'Low', curb_appeal_score_1_to_10 to 1, and "
             "overall_property_grade to 'Insufficient imagery' rather than guessing facade "
             "condition. Leave facade-dependent fields empty or explicitly marked unknown."
         )

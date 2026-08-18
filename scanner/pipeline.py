@@ -17,6 +17,7 @@ from PIL import Image
 from . import analysis, config
 from .geo import compass_bearing, geocode_address, get_streetview_metadata
 from .imagery import (
+    OWNER_PREFIX,
     download_all_property_perspectives,
     download_timeline_images,
     find_historical_panos,
@@ -39,11 +40,16 @@ def _noop(stage: str, detail: str) -> None:
 
 
 def run_scan(address: str, out_dir: Path,
-             on_progress: Optional[ProgressFn] = None) -> dict:
+             on_progress: Optional[ProgressFn] = None,
+             owner_photos: Optional[List[str]] = None) -> dict:
     """
     Scan `address`, write every artifact into `out_dir`, and return the payload
     describing them. Filenames in the payload are relative to `out_dir`; the API
     turns them into signed URLs.
+
+    `owner_photos` names files the API has already validated, re-encoded and
+    written into `out_dir`. They join the Google imagery for every stage that
+    looks at pictures.
     """
     progress = on_progress or _noop
     config.require_keys()
@@ -71,12 +77,18 @@ def run_scan(address: str, out_dir: Path,
     # ── Imagery ──────────────────────────────────────────────────────────────
     progress("imagery", "Fetching satellite and street-level imagery")
     images = download_all_property_perspectives(address, maps_key, facade_heading, meta)
+
+    # Owner photos go in after the Google set, so they read last in the report
+    # and never displace a satellite or Street View plate.
+    images.update(_load_owner_photos(out_dir, owner_photos or []))
+
     if not images:
         raise ScanFailed(
             "No imagery is available for this location. Google Maps returned nothing "
-            "for either the satellite or street view."
+            "for either the satellite or street view, and no photos were attached."
         )
-    log.info("Got %d perspectives", len(images))
+    log.info("Got %d perspectives (%d owner-supplied)",
+             len(images), sum(1 for k in images if k.startswith(OWNER_PREFIX)))
 
     # ── Condition assessment ─────────────────────────────────────────────────
     progress("inspection", "Running the condition assessment")
@@ -118,6 +130,9 @@ def run_scan(address: str, out_dir: Path,
     if config.ENABLE_RENOVATION:
         facade = pick_facade(images)
         if facade is not None:
+            if not any(k.startswith("street") for k in images):
+                log.info("No Street View frame — basing renovation concepts on an "
+                         "owner photo instead")
             progress("renovation", "Designing three costed renovation concepts")
             try:
                 concepts = analysis.build_renovation_concepts(address, facade, report, client)
@@ -147,6 +162,28 @@ def run_scan(address: str, out_dir: Path,
 
     (out_dir / "report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
+
+
+def _load_owner_photos(out_dir: Path, names: List[str]) -> Dict[str, Image.Image]:
+    """
+    Open the attachments the API already wrote into the scan directory.
+
+    A photo that will not open is skipped rather than fatal: the API decoded and
+    re-encoded every one of these on the way in, so a failure here means disk
+    trouble, and losing one attachment is a far better outcome than losing the
+    paid scan.
+    """
+    loaded: Dict[str, Image.Image] = {}
+    for name in names:
+        path = out_dir / name
+        try:
+            with Image.open(path) as img:
+                loaded[Path(name).stem] = img.convert("RGB")
+        except Exception as exc:
+            log.warning("Could not load owner photo %s: %s", name, exc)
+    if loaded:
+        log.info("Loaded %d owner photo(s)", len(loaded))
+    return loaded
 
 
 def _save(out_dir: Path, address: str, lat: float, lng: float,

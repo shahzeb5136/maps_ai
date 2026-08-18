@@ -72,6 +72,14 @@ ALLOWED_ORIGINS: List[str] = [
     if o.strip()
 ]
 
+# ── Owner-supplied photos ────────────────────────────────────────────────────
+# Attachments are re-encoded to JPEG before storage, so these bound the *input*.
+# UPLOAD_MAX_EDGE also bounds what the vision model is billed for: a 4032px
+# phone photo costs the same to analyse as a 1600px one, and reads no better.
+MAX_UPLOAD_IMAGES: int = int(_env("MAX_UPLOAD_IMAGES", "6"))
+MAX_UPLOAD_MB: float = float(_env("MAX_UPLOAD_MB", "12"))
+UPLOAD_MAX_EDGE: int = int(_env("UPLOAD_MAX_EDGE", "1600"))
+
 # ── Billing ──────────────────────────────────────────────────────────────────
 CREDIT_COST: int = int(_env("SCAN_CREDIT_COST", "1"))
 

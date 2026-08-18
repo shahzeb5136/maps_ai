@@ -103,14 +103,46 @@ def download_all_property_perspectives(address: str, api_key: str,
     return images
 
 
+# Owner uploads are keyed `owner_photo_N` by the API before the pipeline runs.
+OWNER_PREFIX = "owner_photo"
+
+
 def has_street_imagery(images: Dict[str, Image.Image]) -> bool:
     return any(k.startswith("street") for k in images)
 
 
+def has_owner_photos(images: Dict[str, Image.Image]) -> bool:
+    return any(k.startswith(OWNER_PREFIX) for k in images)
+
+
+def has_ground_imagery(images: Dict[str, Image.Image]) -> bool:
+    """
+    Whether anything shows the building from the ground.
+
+    This — not Street View coverage alone — is what decides whether facade
+    claims are supportable. A property Google has never driven past is still
+    fully assessable if the owner photographed it themselves.
+    """
+    return has_street_imagery(images) or has_owner_photos(images)
+
+
 def pick_facade(images: Dict[str, Image.Image]) -> Optional[Image.Image]:
-    """The front elevation if we got it, else any street-level frame."""
-    return images.get("street_facade_front") or next(
-        (v for k, v in images.items() if k.startswith("street")), None
+    """
+    The image to hang the renovation concepts off.
+
+    Street View first: it is consistently framed and roughly eye-level, which
+    is what the image model needs to hold the camera still between the before
+    and the after. An owner photo is the fallback, and it is the reason
+    properties with no Street View coverage can now get renovation concepts at
+    all.
+    """
+    if images.get("street_facade_front"):
+        return images["street_facade_front"]
+    street = next((v for k, v in images.items() if k.startswith("street")), None)
+    if street is not None:
+        return street
+    return next(
+        (images[k] for k in sorted(images) if k.startswith(OWNER_PREFIX)), None
     )
 
 

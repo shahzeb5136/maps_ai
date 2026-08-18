@@ -12,7 +12,7 @@ to replicas.
 
 import asyncio
 import logging
-from typing import Set
+from typing import List, Optional, Set
 
 from scanner import ScanFailed, run_scan
 from scanner.config import SCAN_TIMEOUT_SECONDS
@@ -30,9 +30,10 @@ def init() -> None:
     _semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_SCANS)
 
 
-def submit(scan_id: str, user_id: str, address: str) -> None:
+def submit(scan_id: str, user_id: str, address: str,
+           owner_photos: Optional[List[str]] = None) -> None:
     """Kick off a scan. Returns as soon as the task is scheduled."""
-    task = asyncio.create_task(_run(scan_id, user_id, address))
+    task = asyncio.create_task(_run(scan_id, user_id, address, owner_photos or []))
     # Without a strong reference the event loop may garbage-collect the task
     # mid-flight.
     _tasks.add(task)
@@ -48,7 +49,8 @@ async def shutdown(grace_seconds: float = 5.0) -> None:
     await asyncio.wait(set(_tasks), timeout=grace_seconds)
 
 
-async def _run(scan_id: str, user_id: str, address: str) -> None:
+async def _run(scan_id: str, user_id: str, address: str,
+               owner_photos: List[str]) -> None:
     assert _semaphore is not None, "worker.init() was not called"
 
     loop = asyncio.get_running_loop()
@@ -62,7 +64,8 @@ async def _run(scan_id: str, user_id: str, address: str) -> None:
         try:
             await db.mark_running(scan_id)
             payload = await asyncio.wait_for(
-                asyncio.to_thread(run_scan, address, storage.scan_dir(scan_id), on_progress),
+                asyncio.to_thread(run_scan, address, storage.scan_dir(scan_id),
+                                  on_progress, owner_photos),
                 timeout=SCAN_TIMEOUT_SECONDS,
             )
             await db.mark_completed(scan_id, payload)

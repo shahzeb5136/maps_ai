@@ -35,9 +35,11 @@ ENABLE_TEMPORAL: bool = _flag("SCANNER_ENABLE_TEMPORAL", True)
 ENABLE_RENOVATION: bool = _flag("SCANNER_ENABLE_RENOVATION", True)
 MAX_HISTORICAL_PANOS: int = int(_env("SCANNER_MAX_PANOS", "4"))
 
-# Three concepts, generated in ONE text call, rendered in parallel.
+# Three concepts, generated in ONE text call, rendered in parallel. The tiers
+# escalate by how much of the envelope is touched — not by price, which a
+# handful of photographs cannot tell anyone.
 RENOVATION_TIERS: List[Tuple[str, str]] = [
-    ("Cosmetic Refresh", "Lowest-cost, highest-frequency wins: paint, lighting, door, "
+    ("Cosmetic Refresh", "Lightest touch, quickest wins: paint, lighting, door, "
                          "landscaping, cleaning. No material replacement, no structural work."),
     ("Signature Transformation", "Mid-tier repositioning: replace key facade materials, "
                                  "upgrade windows/doors, add architectural accents and hardscaping."),

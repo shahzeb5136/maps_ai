@@ -2,7 +2,13 @@
 
 Turns a street address into a property intelligence report: satellite and
 Street View imagery, an AI condition assessment, a historical change-detection
-timeline, and three costed renovation concepts rendered image-to-image.
+timeline, and three renovation concepts rendered image-to-image.
+
+Everything the report says is read from the pictures. The scan sees a handful
+of images and nothing else — no comparable sales, no local labour rates, no
+square-foot data — so it reports condition, scope and effort, and quotes no
+prices, valuations or returns. Photographs cannot support those numbers, and a
+confident-sounding figure invented from them is worse than no figure at all.
 
 Runs on Railway as a service the website calls. One scan costs **1 credit**
 from the shared `users` wallet.
@@ -22,7 +28,7 @@ Written to `$STORAGE_DIR/scans/<scan_id>/`:
 | `satellite_topdown.jpg` | Overhead parcel view |
 | `street_facade_front.jpg` + 3 flanks | Street View orbit aimed at the building |
 | `timeline_YYYY_MM.jpg` | One frame per historical Street View capture |
-| `reno_before.jpg` / `reno_after_N.jpg` | Before/after pairs, one per concept |
+| `reno_before.jpg` / `reno_after_N.jpg` | Before/after pairs, one per concept (the `before` is whichever supplied image best shows the exterior) |
 | `owner_photo_N.jpg` | Photos the user attached, re-encoded on upload |
 | `report.json` | The full structured payload |
 | `report.pdf` | The downloadable report |
@@ -52,7 +58,10 @@ user already has a scan running, and **422** when an attachment is rejected.
 ## Owner-supplied photos
 
 Up to `MAX_UPLOAD_IMAGES` (default 6) images can ride along with the address.
-They are analysed beside the Google imagery and appear in both the web report
+They are the best evidence in the scan — current, deliberate, and close enough
+to show material condition that neither a satellite plate nor a years-old
+Street View capture can resolve — so the pipeline treats them as the source of
+truth rather than as supporting material. They appear in both the web report
 and the PDF.
 
 Nothing is stored as uploaded. Every attachment is decoded, bounded, and
@@ -65,17 +74,22 @@ not analysed sideways.
 Validation happens **before** the credit is charged, so a rejected photo costs
 nothing.
 
-Two behaviours worth knowing:
+Three behaviours worth knowing:
 
 - The model is told which images the owner supplied, to prefer them where they
   disagree with a possibly-stale Street View capture, and not to treat the
   absence of a defect in a photo the owner chose as evidence the defect is
   absent.
-- Facade selection for the renovation concepts still prefers Street View, whose
-  consistent framing is what lets the image model hold the camera steady
-  between before and after. An owner photo is the fallback — which is why a
-  property Google has never driven past can now get renovation concepts and a
-  non-`Low` confidence rating at all.
+- The renovation stage receives every owner photograph, not just the one being
+  rendered. The close-ups are where the scope comes from: each scope item has to
+  name the image it was read from and describe what is visible there, and an
+  item that cannot be grounded that way is dropped.
+- Facade selection for the render now follows the imagery rather than a fixed
+  preference. The inspection stage — which has just looked at every plate —
+  nominates the image giving the fullest view of the exterior, and is told to
+  prefer an owner photograph when one shows the whole elevation. Owner photos
+  lead the fallback order too. Street View framing is steadier, but not worth
+  rendering a building as it looked three years ago.
 
 ## Credits
 

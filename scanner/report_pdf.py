@@ -98,11 +98,11 @@ def _raw(html: str, style="body") -> Paragraph:
     return Paragraph(html, ST[style])
 
 
-def _money(n) -> str:
-    try:
-        return f"${int(n):,}"
-    except (TypeError, ValueError):
-        return "—"
+def _effort_color(level) -> colors.Color:
+    """Light work reads green, substantial work reads amber — a scale of
+    disruption, which is the one axis photographs can actually support."""
+    return {"light": POS, "moderate": ACCENT, "substantial": WARN}.get(
+        str(level).strip().lower(), INK_2)
 
 
 def _title_case(key: str) -> str:
@@ -392,11 +392,22 @@ def _perspectives(payload: dict, base: Path) -> List:
     imagery = payload.get("imagery") or {}
     if not imagery:
         return []
-    entries = [(_title_case(name), filename) for name, filename in imagery.items()]
+    entries = [
+        (_title_case(name) + (" (supplied)" if name.startswith("owner_photo") else ""),
+         filename)
+        for name, filename in imagery.items()
+    ]
     grid = _image_grid(entries, base, per_row=2)
     if not grid:
         return []
-    return _section("Visual Perspectives") + grid
+
+    flow = _section("Visual Perspectives")
+    if any(name.startswith("owner_photo") for name in imagery):
+        supplied = sum(1 for name in imagery if name.startswith("owner_photo"))
+        flow += [_p(f"{supplied} photograph(s) supplied with this scan carried the same "
+                    "weight as the Google imagery, and more where the two disagreed.",
+                    "small"), Spacer(1, 6)]
+    return flow + grid
 
 
 def _temporal(payload: dict, base: Path) -> List:
@@ -424,9 +435,9 @@ def _temporal(payload: dict, base: Path) -> List:
     ]
     flow += [_facts_table(signals), Spacer(1, 8)]
 
-    if temporal.get("investment_signal"):
-        flow += [_callout([_raw("<b>Investment signal.</b> "
-                                + escape(str(temporal["investment_signal"])), "body")]),
+    if temporal.get("upkeep_signal"):
+        flow += [_callout([_raw("<b>Upkeep signal.</b> "
+                                + escape(str(temporal["upkeep_signal"])), "body")]),
                  Spacer(1, 10)]
 
     snapshots = temporal.get("timeline") or []
@@ -462,8 +473,18 @@ def _renovation(payload: dict, base: Path) -> List:
                  "body"),
             _p(reno.get("recommendation_rationale"), "body"),
         ], border=POS, fill=colors.HexColor("#f0fdf4")),
-        Spacer(1, 12),
+        Spacer(1, 6),
     ]
+
+    # Say out loud which photograph the renders were built from. When it is the
+    # client's own, that is the single most reassuring line on the page.
+    source = reno.get("before_source")
+    if source:
+        origin = ("your own photograph" if reno.get("before_is_owner_photo")
+                  else "Street View imagery")
+        flow += [_p(f"Concepts and renders were read from {origin} "
+                    f"({_title_case(str(source))}).", "small")]
+    flow += [Spacer(1, 8)]
 
     variants = reno.get("variants") or []
     for i, v in enumerate(variants):
@@ -489,60 +510,70 @@ def _renovation(payload: dict, base: Path) -> List:
             flow += _image_grid(pair, base, per_row=max(2, len(pair)))
             flow += [Spacer(1, 4)]
 
-        roi = v.get("estimated_roi_pct")
-        roi_color = POS if isinstance(roi, int) and roi >= 0 else NEG
-        econ = [
-            ("Total cost", _money(v.get("total_estimated_cost_usd"))),
-            ("Projected uplift", _money(v.get("estimated_value_uplift_usd"))),
-            ("ROI", f"{roi}%" if roi is not None else "—"),
+        effort = v.get("overall_effort")
+        read_from = [_title_case(str(x)) for x in (v.get("grounded_in_images") or [])]
+        summary = [
+            ("SCOPE TIER", str(v.get("tier") or "—"), INK),
+            ("OVERALL EFFORT", str(effort or "—"), _effort_color(effort)),
+            ("READ FROM", ", ".join(read_from) or "—", INK),
         ]
         cell_w = CONTENT_W / 3
-        econ_row = Table(
-            [[_p(label, "kpilabel") for label, _ in econ],
+        summary_row = Table(
+            [[_p(label, "kpilabel") for label, _, _ in summary],
              [Paragraph(escape(value),
-                        ParagraphStyle(f"roi{i}", parent=ST["kpi"],
-                                       textColor=roi_color if label == "ROI" else INK))
-              for label, value in econ]],
+                        ParagraphStyle(f"sum{i}{n}", parent=ST["kpi"],
+                                       fontSize=11 if len(value) > 16 else 14,
+                                       leading=15 if len(value) > 16 else 17,
+                                       textColor=color))
+              for n, (_, value, color) in enumerate(summary)]],
             colWidths=[cell_w] * 3,
         )
-        econ_row.setStyle(TableStyle([
+        summary_row.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), BAND),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("TOPPADDING", (0, 0), (-1, 0), 8),
             ("BOTTOMPADDING", (0, 1), (-1, 1), 8),
             ("LEFTPADDING", (0, 0), (-1, -1), 10),
             ("LINEAFTER", (0, 0), (-2, -1), 0.5, colors.white),
         ]))
-        flow += [econ_row, Spacer(1, 10)]
+        flow += [summary_row, Spacer(1, 6)]
 
-        line_items = v.get("line_items") or []
-        if line_items:
-            header = [_p("Scope item", "cellb"), _p("Cost", "cellb"), _p("Reasoning", "cellb")]
+        if v.get("visual_impact"):
+            flow += [_callout([_raw("<b>What changes on sight.</b> "
+                                    + escape(str(v["visual_impact"])), "body")]),
+                     Spacer(1, 10)]
+
+        # Every row carries the image evidence behind it, which is the whole
+        # claim this report is willing to make: here is what we can see, and
+        # here is the work it calls for.
+        scope_items = v.get("scope_items") or []
+        if scope_items:
+            header = [_p("Scope item", "cellb"), _p("Effort", "cellb"),
+                      _p("What the imagery shows", "cellb")]
             rows = [header]
-            for li in line_items:
+            for item in scope_items:
                 rows.append([
-                    _p(li.get("scope_item"), "cell"),
-                    _p(_money(li.get("estimated_cost_usd")), "cell"),
-                    _p(li.get("reasoning"), "cell"),
+                    _p(item.get("scope_item"), "cell"),
+                    Paragraph(escape(str(item.get("effort") or "—")),
+                              ParagraphStyle(f"eff{i}", parent=ST["cellb"],
+                                             textColor=_effort_color(item.get("effort")))),
+                    _p(item.get("visual_evidence"), "cell"),
                 ])
-            rows.append([
-                _p("Total", "cellb"),
-                _p(_money(v.get("total_estimated_cost_usd")), "cellb"),
-                "",
-            ])
-            table = Table(rows, colWidths=[CONTENT_W * 0.26, CONTENT_W * 0.14,
-                                           CONTENT_W * 0.60], repeatRows=1)
+            table = Table(rows, colWidths=[CONTENT_W * 0.28, CONTENT_W * 0.13,
+                                           CONTENT_W * 0.59], repeatRows=1)
             table.setStyle(TableStyle([
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("BACKGROUND", (0, 0), (-1, 0), BAND),
                 ("LINEBELOW", (0, 0), (-1, 0), 0.6, RULE),
                 ("LINEBELOW", (0, 1), (-1, -2), 0.4, RULE),
-                ("LINEABOVE", (0, -1), (-1, -1), 0.8, INK_3),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                 ("LEFTPADDING", (0, 0), (0, -1), 4),
             ]))
-            flow += [table, _p("Costs are model estimates, not contractor quotes.", "small"),
+            flow += [table,
+                     _p("Every item above is tied to something visible in the imagery. "
+                        "Figures are deliberately absent - a contractor standing at the "
+                        "building is the only honest source for those.", "small"),
                      Spacer(1, 10)]
 
         flow += [_two_col(
@@ -573,9 +604,12 @@ def build_pdf(output_path: Path, payload: dict, image_dir: Path) -> Path:
     story += [
         Spacer(1, 14), _rule(0, 6),
         _p("Generated by NexGen Property Intelligence from public satellite and Street View "
-           "imagery. Condition scores, cost estimates and value uplifts are AI-generated "
-           "assessments for screening purposes only — they are not a survey, an appraisal, "
-           "or a contractor quote.", "small"),
+           "imagery together with any photographs supplied with the scan. Every finding "
+           "here is read from those images and limited by what they show. Condition "
+           "scores and renovation scopes are AI-generated assessments for screening "
+           "purposes only — not a survey, an appraisal, or a contractor quote. No figure "
+           "in this report is a valuation, a price or a return: photographs cannot "
+           "support those, so none are offered.", "small"),
     ]
 
     doc.build(story)

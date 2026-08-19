@@ -51,9 +51,11 @@ def main() -> int:
 
     reno = payload.get("renovation")
     if reno:
+        print(f"\nConcepts (from {reno.get('before_source') or 'the facade image'}):")
         for v in reno["variants"]:
             print(f"  - {v['concept_name']} ({v['tier']}): "
-                  f"${v['total_estimated_cost_usd']:,} -> {v['estimated_roi_pct']}% ROI")
+                  f"{v.get('overall_effort', '?')} effort, "
+                  f"{len(v.get('scope_items') or [])} scope items")
         print(f"  recommended: {reno['recommended_concept_name']}")
 
     print(f"\nDone -> {out_dir.resolve()}")

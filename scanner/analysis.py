@@ -2,8 +2,13 @@
 The three Gemini stages: condition assessment, temporal diffing, and the
 renovation concepts plus their image-to-image renders.
 
-Prompts are copied verbatim from the original script — they are tuned, and
-rewording them changes the output quality, not just its phrasing.
+Every stage is grounded in the supplied photographs and nothing else. The
+prompts say so repeatedly and deliberately: this pipeline sees a handful of
+images, so it reports what is visible in them and refuses the questions
+pictures cannot answer.
+
+The prompts are tuned; rewording them changes the output quality, not just
+its phrasing.
 """
 
 import concurrent.futures
@@ -39,13 +44,17 @@ def analyze_property(address: str, images: Dict[str, Image.Image],
                      client: genai.Client) -> PropertyInspectionReport:
     contents: List[object] = []
     for label, img in images.items():
+        # The raw key rides along with the display label because
+        # best_exterior_view has to come back as something we can look up.
         if label.startswith(OWNER_PREFIX):
             contents.append(
                 f"Image Perspective: {label.replace('_', ' ').upper()} "
-                "(SUPPLIED BY THE PROPERTY OWNER)"
+                f"(label: {label}) (SUPPLIED BY THE PROPERTY OWNER)"
             )
         else:
-            contents.append(f"Image Perspective: {label.replace('_', ' ').upper()}")
+            contents.append(
+                f"Image Perspective: {label.replace('_', ' ').upper()} (label: {label})"
+            )
         contents.append(img)
 
     contents.append(f"""
@@ -60,8 +69,14 @@ Supplied imagery:
   usually current and often show what the other sources cannot - close-up material
   condition, elevations hidden from the road, damage, or recent work.
 
-Cross-reference overhead and horizontal views. Do not report features you cannot actually
-see. Set imagery_confidence honestly. Return strict JSON per the schema.
+Cross-reference overhead and horizontal views. The images above are your only evidence:
+every field must be traceable to something visible in one of them. Do not report features
+you cannot actually see, and do not infer them from the address, the neighbourhood or the
+apparent class of the building. Set imagery_confidence honestly.
+
+For best_exterior_view, name the single image that a designer would work from - the most
+complete, least obstructed view of the building's exterior - using its label exactly as
+given above. Return strict JSON per the schema.
 """)
 
     if has_owner_photos(images):
@@ -116,7 +131,7 @@ Images are supplied OLDEST FIRST. Compare them frame by frame and report:
   Flag anything appearing abruptly as POSSIBLE UNPERMITTED WORK if it looks structural
   rather than routine maintenance.
 - Vegetation: canopy growth (root/foundation risk, fire fuel) vs clearing.
-- Maintenance trajectory: is the owner investing, or is the asset decaying?
+- Upkeep: is the property being actively looked after, or visibly decaying?
 
 State WHICH date range each change occurred in. Camera position and image quality vary
 between captures - if that makes a comparison unreliable, say so rather than inventing
@@ -139,46 +154,99 @@ change. Return strict JSON per the schema.
 # ── 3. Renovation ────────────────────────────────────────────────────────────
 def build_renovation_concepts(address: str, facade: Image.Image,
                               report: PropertyInspectionReport,
-                              client: genai.Client) -> RenovationConcepts:
-    """One text call produces all three tiers, so they're costed against each other."""
+                              client: genai.Client,
+                              facade_label: str = "",
+                              images: Optional[Dict[str, Image.Image]] = None,
+                              ) -> RenovationConcepts:
+    """
+    One text call produces all three tiers, so they are scoped against each other.
+
+    The base photo goes in first because it is what the image model will edit,
+    but every owner-supplied photograph goes in beside it. Those close-ups are
+    what turn a concept from a plausible-sounding design into one addressed to
+    this building's actual peeling paint, cracked tile and rusted railing — the
+    detail no satellite frame and no years-old Street View capture carries.
+    """
     tier_spec = "\n".join(
         f"{i+1}. {name} - {desc}" for i, (name, desc) in enumerate(config.RENOVATION_TIERS)
     )
 
+    images = images or {}
+    contents: List[object] = [
+        f"BASE PHOTOGRAPH (label: {facade_label or 'facade'}) - this exact photo will be "
+        "edited to render the concept. Read the building from it.",
+        facade,
+    ]
+
+    owner_labels = [k for k in sorted(images) if k.startswith(OWNER_PREFIX)]
+    extra_owner = [k for k in owner_labels if images[k] is not facade]
+    for label in extra_owner:
+        contents.append(
+            f"OWNER-SUPPLIED PHOTOGRAPH (label: {label}) - taken by the owner, current, "
+            "and the closest look available at real material condition."
+        )
+        contents.append(images[label])
+
+    evidence_note = (
+        f"You have {len(extra_owner)} additional owner photograph(s) beyond the base "
+        "photo. They are the ground truth for material condition: where they disagree "
+        "with the assessment summary or with a Street View capture, believe the "
+        "photographs. Draw scope from what they actually show."
+        if extra_owner else
+        "No owner photographs were supplied beyond the base photo, so the base photo is "
+        "your only close look at the building. Keep the scope to defects and materials "
+        "visible in it, and say so honestly in visual_evidence rather than inventing "
+        "detail the photo does not resolve."
+    )
+
     prompt = f"""
-You are a design-build general contractor and renovation ROI analyst.
+You are a design-build general contractor briefing a client on exterior work.
 
 Property: "{address}"
-Current assessment: {report.architectural_profile.primary_style}, grade
+Assessment read from the same imagery: {report.architectural_profile.primary_style}, grade
 {report.architectural_profile.overall_property_grade}, curb appeal
 {report.architectural_profile.curb_appeal_score_1_to_10}/10, roof condition
 {report.roof_inspection.condition_score_1_to_10}/10.
 Known issues: {', '.join(report.risk_factors_or_deferred_maintenance) or 'none noted'}
 
-Produce THREE distinct EXTERIOR-ONLY renovation concepts, one per tier, cheapest first:
+{evidence_note}
+
+Produce THREE distinct EXTERIOR-ONLY renovation concepts, one per tier, lightest first:
 
 {tier_spec}
 
 Rules:
-- The three must be VISUALLY distinct, not the same design at three price points.
+- THE PHOTOGRAPHS ARE THE BRIEF. Every scope item must answer something you can point to
+  in a supplied image, and visual_evidence must name that image and say what is visible
+  in it. Drop any item you cannot ground that way, however conventional it sounds.
+- Work from the photographs, not from assumptions about the address, the neighbourhood,
+  or what buildings of this type usually need.
+- The three must be VISUALLY distinct, not one design at three levels of intensity.
   Different material palettes, different colour stories, different target buyers.
-- Cost every line item in USD using local market labor rates and visible square footage.
-- Budgets must escalate meaningfully across tiers and reflect genuinely different scopes.
+- Scope must escalate meaningfully across tiers: the tiers differ in how much of the
+  envelope is touched and how much disruption that causes, expressed through `effort`
+  and `overall_effort` as Light / Moderate / Substantial.
+- NEVER state or imply money. No prices, budgets, quotes, currency figures, value uplift,
+  resale gain, ROI, payback or "worth it" arithmetic. A handful of photographs cannot
+  support any of that, and a number invented from them would be a fabrication. Describe
+  scope, effort and visible impact instead, and let the reader price it locally.
 - No changes to building footprint or roofline - facade, materials, windows, doors,
   paint, lighting, driveway and landscaping only.
-- estimated_value_uplift_usd must be a defensible appraisal delta, not wishful thinking.
-  Diminishing returns are real: the most expensive tier often has the WORST ROI, and you
-  should say so if that is the case here.
-- Each image_edit_prompt must instruct an image model to edit THIS EXACT photo: preserve
-  camera angle, perspective, structure, neighbours and sky; change only the specified
-  finishes. Be concrete about materials and colors.
-- recommended_concept_name must be the best RISK-ADJUSTED return, not simply the highest ROI.
+- Each image_edit_prompt must instruct an image model to edit THE BASE PHOTOGRAPH exactly:
+  preserve camera angle, perspective, structure, neighbours and sky; change only the
+  specified finishes. Be concrete about materials and colors.
+- grounded_in_images must list the labels you actually read the concept from, owner
+  photographs first.
+- recommended_concept_name is the concept that best resolves the defects visible in the
+  photographs for the effort it demands - not simply the largest one.
 
 Return strict JSON per the schema.
 """
+    contents.append(prompt)
+
     resp = client.models.generate_content(
         model=config.TEXT_MODEL,
-        contents=[facade, prompt],
+        contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=RenovationConcepts,

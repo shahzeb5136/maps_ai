@@ -126,24 +126,37 @@ def has_ground_imagery(images: Dict[str, Image.Image]) -> bool:
     return has_street_imagery(images) or has_owner_photos(images)
 
 
-def pick_facade(images: Dict[str, Image.Image]) -> Optional[Image.Image]:
+def pick_facade(images: Dict[str, Image.Image],
+                preferred: str = "") -> Tuple[Optional[Image.Image], str]:
     """
-    The image to hang the renovation concepts off.
+    The image to hang the renovation concepts off, and its label.
 
-    Street View first: it is consistently framed and roughly eye-level, which
-    is what the image model needs to hold the camera still between the before
-    and the after. An owner photo is the fallback, and it is the reason
-    properties with no Street View coverage can now get renovation concepts at
-    all.
+    `preferred` is the label the inspection stage nominated after looking at
+    every plate — that model has seen the pictures and this function has not,
+    so its choice wins whenever it names an image we actually hold.
+
+    Failing that, an owner photograph leads. Owner photos are current and were
+    taken deliberately at the building, while a Street View capture can be
+    years stale and occasionally shows something that is no longer there. The
+    steadier framing of Street View is worth something to the image model, but
+    not more than working from what the property looks like today.
     """
-    if images.get("street_facade_front"):
-        return images["street_facade_front"]
-    street = next((v for k, v in images.items() if k.startswith("street")), None)
-    if street is not None:
-        return street
-    return next(
-        (images[k] for k in sorted(images) if k.startswith(OWNER_PREFIX)), None
+    # The model is shown 'OWNER PHOTO 1' as well as the key, and answers with
+    # either; and it can nominate the satellite plate, which is the one view
+    # nothing can be rendered from.
+    key = (preferred or "").strip().lower().replace(" ", "_")
+    if key and not key.startswith("satellite") and images.get(key) is not None:
+        return images[key], key
+
+    order = (
+        [k for k in sorted(images) if k.startswith(OWNER_PREFIX)]
+        + [k for k in ("street_facade_front",) if k in images]
+        + [k for k in sorted(images) if k.startswith("street")]
     )
+    for label in order:
+        if images.get(label) is not None:
+            return images[label], label
+    return None, ""
 
 
 # ── Historical panoramas ─────────────────────────────────────────────────────

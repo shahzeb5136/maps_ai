@@ -127,15 +127,21 @@ def run_scan(address: str, out_dir: Path,
     concepts = None
     before_img: Optional[Image.Image] = None
     rendered: List[Optional[Image.Image]] = []
+    facade_label = ""
     if config.ENABLE_RENOVATION:
-        facade = pick_facade(images)
+        # The inspection stage has seen every plate, so it nominates the one to
+        # render from; pick_facade only falls back to its own ordering when that
+        # nomination names an image we do not hold.
+        facade, facade_label = pick_facade(images, report.best_exterior_view)
         if facade is not None:
-            if not any(k.startswith("street") for k in images):
-                log.info("No Street View frame — basing renovation concepts on an "
-                         "owner photo instead")
-            progress("renovation", "Designing three costed renovation concepts")
+            log.info("Rendering concepts from '%s'%s", facade_label,
+                     " (owner-supplied)" if facade_label.startswith(OWNER_PREFIX) else "")
+            progress("renovation", "Designing three renovation concepts from your imagery")
             try:
-                concepts = analysis.build_renovation_concepts(address, facade, report, client)
+                concepts = analysis.build_renovation_concepts(
+                    address, facade, report, client,
+                    facade_label=facade_label, images=images,
+                )
                 progress("rendering", f"Rendering {len(concepts.variants)} concept images")
                 rendered = analysis.render_all_variants(facade, concepts, client)
                 log.info("%d/%d concepts rendered", sum(1 for r in rendered if r), len(rendered))
@@ -149,7 +155,8 @@ def run_scan(address: str, out_dir: Path,
     # ── Persist ──────────────────────────────────────────────────────────────
     progress("saving", "Writing the report")
     payload = _save(out_dir, address, lat, lng, images, report,
-                    timeline_imgs, temporal, concepts, before_img, rendered)
+                    timeline_imgs, temporal, concepts, before_img, rendered,
+                    facade_label)
 
     progress("pdf", "Building the PDF")
     try:
@@ -188,7 +195,7 @@ def _load_owner_photos(out_dir: Path, names: List[str]) -> Dict[str, Image.Image
 
 def _save(out_dir: Path, address: str, lat: float, lng: float,
           images: Dict[str, Image.Image], report, timeline_imgs, temporal,
-          concepts, before_img, rendered) -> dict:
+          concepts, before_img, rendered, facade_label: str = "") -> dict:
     """Write every image to disk and assemble the payload that references them."""
     imagery: Dict[str, str] = {}
     for name, img in images.items():
@@ -219,6 +226,10 @@ def _save(out_dir: Path, address: str, lat: float, lng: float,
 
         renovation = {
             "before": "reno_before.jpg",
+            # Which supplied image the concepts were read from, so the report
+            # can say whose photograph the before/after actually is.
+            "before_source": facade_label,
+            "before_is_owner_photo": facade_label.startswith(OWNER_PREFIX),
             "recommended_concept_name": concepts.recommended_concept_name,
             "recommendation_rationale": concepts.recommendation_rationale,
             "variants": variants,

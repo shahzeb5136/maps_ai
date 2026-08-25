@@ -503,8 +503,8 @@ def _renovation(payload: dict, base: Path) -> List:
             Spacer(1, 6),
         ]
 
-        # Before / after, side by side. The web report has the slider; print gets a pair.
-        pair = [("BEFORE", reno.get("before")), ("AFTER", v.get("after"))]
+        # Current / concept, side by side — the same pairing the web report shows.
+        pair = [("CURRENT", reno.get("before")), ("CONCEPT", v.get("after"))]
         pair = [(caption, filename) for caption, filename in pair if filename]
         if pair:
             flow += _image_grid(pair, base, per_row=max(2, len(pair)))

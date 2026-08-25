@@ -21,7 +21,12 @@ from google.genai import types
 from PIL import Image
 
 from . import config
-from .imagery import OWNER_PREFIX, has_ground_imagery, has_owner_photos
+from .imagery import (
+    OWNER_PREFIX,
+    has_ground_imagery,
+    has_owner_photos,
+    owner_photo_labels,
+)
 from .models import (
     PropertyInspectionReport,
     RenovationConcepts,
@@ -172,14 +177,16 @@ def build_renovation_concepts(address: str, facade: Image.Image,
     )
 
     images = images or {}
+    base_is_owner = facade_label.startswith(OWNER_PREFIX)
     contents: List[object] = [
-        f"BASE PHOTOGRAPH (label: {facade_label or 'facade'}) - this exact photo will be "
-        "edited to render the concept. Read the building from it.",
+        f"BASE PHOTOGRAPH (label: {facade_label or 'facade'})"
+        + (" - SUPPLIED BY THE PROPERTY OWNER" if base_is_owner else "")
+        + " - this exact photo will be edited to render the concept. Read the "
+          "building from it.",
         facade,
     ]
 
-    owner_labels = [k for k in sorted(images) if k.startswith(OWNER_PREFIX)]
-    extra_owner = [k for k in owner_labels if images[k] is not facade]
+    extra_owner = [k for k in owner_photo_labels(images) if images[k] is not facade]
     for label in extra_owner:
         contents.append(
             f"OWNER-SUPPLIED PHOTOGRAPH (label: {label}) - taken by the owner, current, "

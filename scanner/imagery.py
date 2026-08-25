@@ -115,6 +115,22 @@ def has_owner_photos(images: Dict[str, Image.Image]) -> bool:
     return any(k.startswith(OWNER_PREFIX) for k in images)
 
 
+def owner_photo_labels(images: Dict[str, Image.Image]) -> List[str]:
+    """
+    Owner keys in the order the owner attached them.
+
+    Sorted on the trailing number rather than the string, so the tenth
+    attachment does not sort ahead of the second once MAX_UPLOAD_IMAGES is
+    raised past nine.
+    """
+    def index(label: str) -> Tuple[int, str]:
+        tail = label.rsplit("_", 1)[-1]
+        return (int(tail) if tail.isdigit() else 1 << 30, label)
+
+    return sorted((k for k in images if k.startswith(OWNER_PREFIX)
+                   and images[k] is not None), key=index)
+
+
 def has_ground_imagery(images: Dict[str, Image.Image]) -> bool:
     """
     Whether anything shows the building from the ground.
@@ -131,26 +147,41 @@ def pick_facade(images: Dict[str, Image.Image],
     """
     The image to hang the renovation concepts off, and its label.
 
-    `preferred` is the label the inspection stage nominated after looking at
-    every plate — that model has seen the pictures and this function has not,
-    so its choice wins whenever it names an image we actually hold.
-
-    Failing that, an owner photograph leads. Owner photos are current and were
-    taken deliberately at the building, while a Street View capture can be
+    An owner photograph wins whenever one exists. Owner photos are current and
+    were taken deliberately at the building, while a Street View capture can be
     years stale and occasionally shows something that is no longer there. The
     steadier framing of Street View is worth something to the image model, but
-    not more than working from what the property looks like today.
+    not more than rendering the property as it actually looks today — so when
+    the owner has supplied photographs, the concepts are built from theirs and
+    Google's imagery is only ever the fallback.
+
+    `preferred` is the label the inspection stage nominated after looking at
+    every plate. That model has seen the pictures and this function has not, so
+    its choice decides *which* owner photo to use; it only reaches the Google
+    imagery when no owner photo was supplied at all.
     """
     # The model is shown 'OWNER PHOTO 1' as well as the key, and answers with
     # either; and it can nominate the satellite plate, which is the one view
     # nothing can be rendered from.
     key = (preferred or "").strip().lower().replace(" ", "_")
-    if key and not key.startswith("satellite") and images.get(key) is not None:
+    nominated = (
+        key
+        and not key.startswith("satellite")
+        and images.get(key) is not None
+    )
+
+    owner = owner_photo_labels(images)
+    if owner:
+        # Honour the nomination only if it stayed inside the owner's own set.
+        if nominated and key.startswith(OWNER_PREFIX):
+            return images[key], key
+        return images[owner[0]], owner[0]
+
+    if nominated:
         return images[key], key
 
     order = (
-        [k for k in sorted(images) if k.startswith(OWNER_PREFIX)]
-        + [k for k in ("street_facade_front",) if k in images]
+        [k for k in ("street_facade_front",) if k in images]
         + [k for k in sorted(images) if k.startswith("street")]
     )
     for label in order:

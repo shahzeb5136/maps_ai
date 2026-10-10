@@ -1,23 +1,67 @@
 # Property Scanner API
 
-Turns a street address into a property intelligence report: satellite and
-Street View imagery, an AI condition assessment, a historical change-detection
-timeline, and three renovation concepts rendered image-to-image.
+Turns an address and a handful of photographs into a property inspection: every
+defect located on the photo it was seen in, merged into one register, scored
+by building system, read out in a narrated walkthrough, and answerable in
+plain English afterwards. Alongside it, the original survey: satellite and
+Street View imagery, a historical change timeline, and renovation concepts
+rendered image-to-image.
 
-Everything the report says is read from the pictures. The scan sees a handful
-of images and nothing else — no comparable sales, no local labour rates, no
-square-foot data — so it reports condition, scope and effort, and quotes no
-prices, valuations or returns. Photographs cannot support those numbers, and a
-confident-sounding figure invented from them is worse than no figure at all.
+Everything the report says is read from the pictures, except the roof
+measurements, which come from Google's Solar API. The scan sees photographs
+and nothing else — no comparable sales, no local labour rates — so it reports
+condition, scope, urgency and who to call, and quotes no prices, valuations or
+returns.
 
 Runs on Railway as a service the website calls. One scan costs **1 credit**
-from the shared `users` wallet.
+from the shared `users` wallet; questions and studio renders on a finished
+scan are included up to a per-scan allowance.
 
 ```
 scanner/    the pipeline — Google Maps + Gemini + the PDF. No web, no database.
 api/        FastAPI: Clerk auth, credits, job rows, signed asset URLs.
+tests/      pytest: fake Gemini, fake Maps, optional real Postgres.
 main.py     local CLI for a one-off scan.
 ```
+
+## What a scan does
+
+Most scans carry five or six photos; the ceiling is 50. Everything below works
+with none at all — the satellite plate and the front Street View plate are
+inspected exactly like photographs.
+
+| Stage | What happens | Model calls |
+|---|---|---|
+| Locate | Geocode, Street View metadata. An address the map cannot find still scans if photos came with it. | — |
+| Imagery | Satellite + 4 Street View angles, **in parallel with** the Solar API: roof planes, pitch, orientation, area, a ranked panel layout. | — |
+| Pinpoint inspection | Every image inspected **on its own call**, in parallel (`SCANNER_VISION_CONCURRENCY`). Each returns located findings (box, system, severity, urgency, trade, confidence), equipment with data-plate text, the space it shows, photo quality. Feeds the live view. Historical Street View diffing runs in the background meanwhile. | 1 per image |
+| Synthesis | Thumbnails of every image + every finding → duplicates merged into issues, photos grouped into rooms, coverage gaps named. **In parallel with** the exterior survey. | 2 |
+| Concepts | Exterior renovation concepts + renders ‖ interior makeovers in the chosen style, with visible defects shown fixed ‖ the listing kit. | ~1 + 3 + 3 images |
+| Report | Health score, equipment ages, annotated evidence, PDF. | — |
+
+Two things fail a scan, and both refund: nothing to look at, and nothing
+assessable at the end. Every other stage is an enrichment that costs the report
+a section when it fails, never the credit.
+
+### Nothing the model says is the score
+
+`scanner/scoring.py` computes every number. Each merged issue removes a fixed
+share of its system's 100 points by severity (critical 40%, major 22%, minor
+8%, cosmetic 3%, compounding, discounted for low confidence); systems combine
+by fixed weights; a system no photo showed is **not assessed**, never assumed
+fine; any open critical issue caps the overall at 69. Below half coverage the
+score is flagged provisional — normal for a five-photo scan — and the report's
+coverage section lists the exact shots that would complete it.
+
+Equipment ages come from data-plate years (or a decoded serial, flagged as
+such) against published service-life ranges.
+
+### The model proposes, the code disposes
+
+`synthesis.merge()` validates everything the synthesis call returns: unknown
+evidence IDs are dropped, every finding lands in exactly one issue (or the
+explicit `dismissed` list), every photo in exactly one room. If the call fails
+outright, the report degrades to one issue per finding and rooms by label.
 
 ## What a scan produces
 
@@ -25,13 +69,14 @@ Written to `$STORAGE_DIR/scans/<scan_id>/`:
 
 | File | What it is |
 |---|---|
-| `satellite_topdown.jpg` | Overhead parcel view |
-| `street_facade_front.jpg` + 3 flanks | Street View orbit aimed at the building |
+| `owner_photo_N.jpg` + `thumb_…` | Photos the user attached, re-encoded on upload |
+| `satellite_topdown.jpg`, `street_*.jpg` + `thumb_…` | Google plates |
 | `timeline_YYYY_MM.jpg` | One frame per historical Street View capture |
-| `reno_before.jpg` / `reno_after_N.jpg` | Before/after pairs, one per concept (the `before` is whichever supplied image best shows the exterior) |
-| `owner_photo_N.jpg` | Photos the user attached, re-encoded on upload |
-| `report.json` | The full structured payload |
-| `report.pdf` | The downloadable report |
+| `reno_before.jpg` / `reno_after_N.jpg` | Exterior concept pairs |
+| `makeover_N.jpg` | Interior makeovers made during the scan |
+| `studio_<id>.jpg` | On-demand studio renders |
+| `annot_*.jpg`, `crop_I01.jpg`, `satellite_roof.jpg` | Pre-drawn evidence for the PDF |
+| `report.json` / `report.pdf` | The payload and the downloadable report |
 
 The API never serves these directly. It hands the browser HMAC-signed,
 time-limited URLs, because `<img src>` and download links cannot send an
@@ -41,55 +86,48 @@ time-limited URLs, because `<img src>` and download links cannot send an
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/health` | Liveness. No auth. |
+| `GET` | `/health` | Liveness + config self-check. No auth. |
+| `GET` | `/api/limits` | Photo limit, goals, styles, allowances. No auth. |
 | `GET` | `/api/credits` | Wallet balance |
 | `GET` | `/api/scans` | The caller's scans, newest first |
-| `POST` | `/api/scans` | multipart `address` + optional `images[]` → charges 1 credit, queues the scan |
-| `GET` | `/api/scans/{id}` | One scan; `result` carries signed URLs once complete |
-| `DELETE` | `/api/scans/{id}` | Removes the row and its files |
+| `POST` | `/api/scans` | multipart `address` + optional `images[]`, `goal`, `style` → charges 1 credit, queues the scan |
+| `GET` | `/api/scans/{id}` | One scan; `live` while running (per-photo feed), `result` + `allowances` once complete |
+| `DELETE` | `/api/scans/{id}` | Removes the row, its questions and renders, and its files |
+| `POST` | `/api/scans/{id}/ask` | `{question}` → answer with cited photos and boxes |
+| `GET` | `/api/scans/{id}/questions` | The scan's Q&A history |
+| `POST` | `/api/scans/{id}/renders` | `{source, mode, style?, instruction?}` → a studio render |
+| `GET` | `/api/scans/{id}/renders` | The scan's studio renders |
 | `GET` | `/api/scans/{id}/files/{name}` | Signed artifact. No bearer token. |
 
-Everything except `/health` and the signed file route needs
-`Authorization: Bearer <clerk session jwt>`.
+Studio modes: `restyle`, `stage` (furnish an empty room), `declutter`,
+`repair` (the inspection's findings shown fixed), `twilight`, `custom`.
 
 `POST /api/scans` returns **402** when the wallet is short, **409** when the
 user already has a scan running, and **422** when an attachment is rejected.
+Ask and renders return **429** once the scan's allowance is used, and a failed
+call does not count against it.
 
 ## Owner-supplied photos
 
-Up to `MAX_UPLOAD_IMAGES` (default 6) images can ride along with the address.
-They are the best evidence in the scan — current, deliberate, and close enough
-to show material condition that neither a satellite plate nor a years-old
-Street View capture can resolve — so the pipeline treats them as the source of
-truth rather than as supporting material. They appear in both the web report
-and the PDF.
+Up to `MAX_PHOTOS` (default 50) images can ride along with the address — JPEG,
+PNG, WebP or HEIC. The website downscales them in the browser before upload,
+so fifty photos is a few tens of megabytes, not hundreds; HEIC, which most
+browsers cannot decode, is sent as-is and decoded here by `pillow-heif`.
 
 Nothing is stored as uploaded. Every attachment is decoded, bounded, and
 re-encoded to a JPEG under a name we chose (`owner_photo_N.jpg`), which handles
 attacker-controlled filenames, polyglot files, decompression bombs and EXIF —
 including the GPS coordinates phones habitually embed — in one step. EXIF
 *orientation* is applied before the metadata is dropped, so portrait photos are
-not analysed sideways.
+not analysed sideways. Decoding runs off the event loop.
 
 Validation happens **before** the credit is charged, so a rejected photo costs
 nothing.
 
-Three behaviours worth knowing:
-
-- The model is told which images the owner supplied, to prefer them where they
-  disagree with a possibly-stale Street View capture, and not to treat the
-  absence of a defect in a photo the owner chose as evidence the defect is
-  absent.
-- The renovation stage receives every owner photograph, not just the one being
-  rendered. The close-ups are where the scope comes from: each scope item has to
-  name the image it was read from and describe what is visible there, and an
-  item that cannot be grounded that way is dropped.
-- Facade selection for the render now follows the imagery rather than a fixed
-  preference. The inspection stage — which has just looked at every plate —
-  nominates the image giving the fullest view of the exterior, and is told to
-  prefer an owner photograph when one shows the whole elevation. Owner photos
-  lead the fallback order too. Street View framing is steadier, but not worth
-  rendering a building as it looked three years ago.
+Owner photos are treated as the most current view of the building: they lead
+wherever they disagree with a possibly-stale Street View capture, and the
+exterior concepts are rendered from an owner photograph of the exterior when
+there is one. Interior photos never reach the exterior stages.
 
 ## Credits
 
@@ -158,9 +196,13 @@ STORAGE_DIR=/data
 ALLOWED_ORIGINS=https://your-website.com,http://localhost:3000
 SCAN_CREDIT_COST=1
 MAX_CONCURRENT_SCANS=2
-MAX_UPLOAD_IMAGES=6
+MAX_PHOTOS=50
 MAX_UPLOAD_MB=12
 ```
+
+`MAX_UPLOAD_IMAGES` is retired — it is ignored, so a deployment that set it to
+6 when six was the product gets the new limit without a variable change. Use
+`MAX_PHOTOS` to set a different one.
 
 Notes:
 
@@ -223,16 +265,28 @@ at the first fetch:
 - Maps Static API
 - Street View Static API
 
-Restrict the key to those three APIs. It's used server-side only, so an IP
+And one more for the roof measurements and solar layout:
+
+- **Solar API**
+
+Without it the scan still completes — the stage logs a 403 once and the report
+simply has no roof-measurement section.
+
+Restrict the key to those four APIs. It's used server-side only, so an IP
 restriction is possible too, though Railway egress IPs are not stable.
 
 ## Cost per scan
 
-Roughly, at current pricing: ~5 static-map/Street-View fetches, up to 4 more
-for the timeline, 3 Gemini text calls, and 3 image generations. The image
-generations dominate. Set `SCANNER_ENABLE_RENOVATION=false` to cut a scan to
-the assessment only, or `SCANNER_ENABLE_TEMPORAL=false` to drop the historical
-diff.
+Roughly: ~5 static-map/Street-View fetches, up to 4 more for the timeline, one
+Solar API call, one vision call per image (a typical six-photo scan makes
+eight), ~5 text calls, and up to 6 image generations (3 exterior concepts, 3
+interior makeovers). The image generations dominate. Questions and studio
+renders afterwards are capped by `ASK_LIMIT_PER_SCAN` (40) and
+`RENDER_LIMIT_PER_SCAN` (12).
+
+Switches: `SCANNER_ENABLE_RENOVATION`, `SCANNER_ENABLE_MAKEOVERS`
+(`SCANNER_MAKEOVER_COUNT`), `SCANNER_ENABLE_LISTING`, `SCANNER_ENABLE_SOLAR`,
+`SCANNER_ENABLE_TEMPORAL`.
 
 ## Local development
 
@@ -243,7 +297,7 @@ pip install -r requirements.txt && cp .env.example .env
 Fill in `.env`, then either run one scan:
 
 ```bash
-python main.py "Maze Tower, Dubai UAE"
+python main.py "Maze Tower, Dubai UAE" --photo kitchen.jpg --photo boiler.jpg --goal buying
 ```
 
 or serve the API:
@@ -255,6 +309,18 @@ uvicorn api.main:app --reload --port 8002
 `DATABASE_URL` has to point at a real Postgres for the API — the credits table
 lives there. Pointing it at the Railway Postgres public URL works fine for
 development.
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                                                     # pipeline, scoring, PDF
+TEST_DATABASE_URL=postgresql://postgres@localhost/scanner_test pytest   # + the API
+```
+
+The suite runs the whole pipeline against a fake Gemini client and fake Google
+fetches (`tests/fakes.py`), so it needs no keys and no network. The API tests
+need a disposable Postgres database; they create their own tables.
 
 ## Scaling notes
 

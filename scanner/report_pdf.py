@@ -166,13 +166,21 @@ def _section(title: str) -> List:
 
 
 # ── Images ───────────────────────────────────────────────────────────────────
-def _img(path: Path, width: float) -> Optional[RLImage]:
-    """Scaled to `width`, keeping the source aspect ratio."""
+def _img(path: Path, width: float, max_height: Optional[float] = None) -> Optional[RLImage]:
+    """Scaled to `width`, keeping the source aspect ratio, and no taller than
+    `max_height` (default: most of a page) — a very tall photo would otherwise
+    raise a LayoutError and lose the whole PDF."""
     if not path.exists():
         return None
     try:
         iw, ih = ImageReader(str(path)).getSize()
-        return RLImage(str(path), width=width, height=width * (ih / iw))
+        if not iw or not ih:
+            return None
+        w, h = width, width * (ih / iw)
+        cap = max_height or 150 * mm
+        if h > cap:
+            w, h = w * cap / h, cap
+        return RLImage(str(path), width=w, height=h)
     except Exception as exc:
         log.warning("Could not embed %s in the PDF: %s", path.name, exc)
         return None
@@ -184,7 +192,7 @@ def _image_grid(entries: List[tuple], base: Path, per_row: int = 2,
     cell_w = (CONTENT_W - gutter * (per_row - 1)) / per_row
     cells = []
     for caption, filename in entries:
-        picture = _img(base / filename, cell_w)
+        picture = _img(base / filename, cell_w, max_height=min(cell_w * 1.6, 110 * mm))
         if picture is None:
             continue
         block = Table([[picture], [_p(caption, "caption")]], colWidths=[cell_w])
@@ -268,6 +276,8 @@ def _callout(body: List, border=ACCENT, fill=colors.HexColor("#eff6ff")) -> Tabl
 
 # ── Sections ─────────────────────────────────────────────────────────────────
 def _cover(payload: dict, base: Path) -> List:
+    if payload.get("health"):
+        return _cover_v2(payload, base)
     inspection = payload.get("inspection") or {}
     arch = inspection.get("architectural_profile") or {}
     coords = payload.get("coordinates") or {}
@@ -337,6 +347,8 @@ def _stamp(iso: Optional[str]) -> str:
 
 def _condition(payload: dict) -> List:
     inspection = payload.get("inspection") or {}
+    if not inspection:
+        return []
     arch = inspection.get("architectural_profile") or {}
     roof = inspection.get("roof_inspection") or {}
     yard = inspection.get("yard_and_parcel") or {}
@@ -369,7 +381,7 @@ def _condition(payload: dict) -> List:
         ], width=(CONTENT_W - 12) / 2),
     ]
 
-    flow = _section("Current Condition")
+    flow = _section("Exterior Survey" if payload.get("health") else "Current Condition")
     flow += [_two_col(left, right), Spacer(1, 12)]
 
     wear = roof.get("visible_wear_or_damage") or []
@@ -390,6 +402,8 @@ def _condition(payload: dict) -> List:
 
 def _perspectives(payload: dict, base: Path) -> List:
     imagery = payload.get("imagery") or {}
+    if payload.get("photos"):
+        imagery = {k: v for k, v in imagery.items() if not k.startswith("owner_photo")}
     if not imagery:
         return []
     entries = [
@@ -584,6 +598,446 @@ def _renovation(payload: dict, base: Path) -> List:
     return flow
 
 
+# ── Inspection layer (version 2 payloads) ──────────────────────────────────
+ORANGE = colors.HexColor("#c2410c")
+SEV_COLOR = {"critical": NEG, "major": ORANGE, "minor": WARN, "cosmetic": INK_3}
+SEV_LABEL = {"critical": "CRITICAL", "major": "MAJOR", "minor": "MINOR", "cosmetic": "COSMETIC"}
+URG_LABEL = {"immediate": "Immediately", "within_6_months": "Within 6 months",
+             "within_2_years": "Within 1-2 years", "monitor": "Monitor"}
+STATUS_LABEL = {"past_life": "Past typical life", "replacement_window": "In replacement window",
+                "within_life": "Within typical life", "dated": "Dated", "unknown": "Age unknown"}
+
+
+def _score_color(score) -> colors.Color:
+    if score is None:
+        return INK_3
+    return POS if score >= 75 else WARN if score >= 55 else NEG
+
+
+def _labels(payload: dict) -> dict:
+    """label -> how a person would name the photo ('Kitchen · P03')."""
+    out = {}
+    for p in payload.get("photos") or []:
+        tag = {"owner": p.get("ref", ""), "satellite": "Satellite",
+               "street_view": "Street View"}.get(p.get("source"), "")
+        out[p["label"]] = f"{p.get('space_label') or _title_case(p['label'])} · {tag}"
+    return out
+
+
+def _hero(payload: dict) -> Optional[str]:
+    listing = payload.get("listing") or {}
+    order = listing.get("photo_order") or []
+    photos = {p["label"]: p for p in payload.get("photos") or []}
+    if order and order[0] in photos:
+        return photos[order[0]]["file"]
+    exterior = [p for p in photos.values() if p.get("source") == "owner" and p.get("is_exterior")]
+    if exterior:
+        return max(exterior, key=lambda p: p.get("listing_appeal", 0))["file"]
+    imagery = payload.get("imagery") or {}
+    return imagery.get("street_facade_front") or imagery.get("satellite_topdown") or (
+        next(iter(photos.values()))["file"] if photos else None)
+
+
+def _cover_v2(payload: dict, base: Path) -> List:
+    health = payload.get("health") or {}
+    report = payload.get("inspection_report") or {}
+    coords = payload.get("coordinates") or {}
+    counts = health.get("counts") or {}
+    photos = payload.get("photos") or []
+    owner = sum(1 for p in photos if p.get("source") == "owner")
+
+    flow: List = [
+        Spacer(1, 6 * mm),
+        _p("PROPERTY INSPECTION REPORT", "eyebrow"),
+        _p(payload.get("address", "Unknown address"), "title"),
+        _p(f"Scanned {_stamp(payload.get('scanned_at'))}"
+           + (f"  ·  {coords['lat']:.5f}, {coords['lng']:.5f}" if coords else "")
+           + f"  ·  {owner} photo{'s' if owner != 1 else ''} supplied", "subtitle"),
+        _rule(8, 10),
+    ]
+
+    score = health.get("score")
+    score_text = f"{score}/100 · {health.get('grade', '—')}" if score is not None else "—"
+    urgent = counts.get("critical", 0)
+    kpis = [
+        ("HEALTH SCORE" + (" (PROVISIONAL)" if health.get("provisional") else ""), score_text,
+         _score_color(score)),
+        ("ISSUES FOUND", str(len(report.get("issues") or [])), INK),
+        ("CRITICAL", str(urgent), NEG if urgent else POS),
+        ("SYSTEMS ASSESSED",
+         f"{health.get('systems_assessed', 0)} of {health.get('systems_total', 12)}", INK),
+    ]
+    cell_w = CONTENT_W / len(kpis)
+    kpi_row = Table(
+        [[_p(label, "kpilabel") for label, _, _ in kpis],
+         [Paragraph(escape(value), ParagraphStyle(f"cv{n}", parent=ST["kpi"], textColor=tone,
+                                                  fontSize=17 if len(value) < 12 else 13))
+          for n, (_, value, tone) in enumerate(kpis)]],
+        colWidths=[cell_w] * len(kpis),
+    )
+    kpi_row.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BAND),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, 0), 10),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("LINEAFTER", (0, 0), (-2, -1), 0.5, colors.white),
+    ]))
+    flow += [kpi_row, Spacer(1, 10)]
+
+    if report.get("verdict") or report.get("executive_summary"):
+        body = []
+        if report.get("verdict"):
+            body.append(_raw(f"<b>{escape(report['verdict'])}</b>", "body"))
+        if report.get("executive_summary"):
+            body.append(_p(report["executive_summary"], "body"))
+        flow += [_callout(body), Spacer(1, 10)]
+
+    if health.get("provisional"):
+        flow += [_callout([_p(
+            f"Provisional score: the photographs gave evidence on "
+            f"{health.get('systems_assessed', 0)} of {health.get('systems_total', 12)} building "
+            "systems. The rest are listed at the end of this report with the photographs that "
+            "would cover them.", "small")], border=WARN, fill=colors.HexColor("#fefce8")),
+            Spacer(1, 10)]
+
+    hero = _hero(payload)
+    if hero:
+        picture = _img(base / hero, CONTENT_W * 0.86)
+        if picture is not None and picture.drawHeight > 120 * mm:
+            ratio = (120 * mm) / picture.drawHeight
+            picture.drawHeight *= ratio
+            picture.drawWidth *= ratio
+        if picture is not None:
+            flow += [picture]
+    return flow
+
+
+def _bar(score, width: float = 70 * mm) -> Table:
+    """A horizontal score bar, as a two-cell table."""
+    if score is None:
+        t = Table([[""]], colWidths=[width], rowHeights=[5])
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), RULE)]))
+        return t
+    filled = max(0.02, min(1.0, score / 100)) * width
+    t = Table([["", ""]], colWidths=[filled, max(0.01, width - filled)], rowHeights=[5])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), _score_color(score)),
+        ("BACKGROUND", (1, 0), (1, 0), RULE),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
+
+
+def _inspection_summary(payload: dict) -> List:
+    health = payload.get("health")
+    if not health:
+        return []
+    flow = _section("Health by System")
+    flow += [_p(health.get("method", ""), "small"), Spacer(1, 8)]
+
+    rows = [[_p("System", "cellb"), _p("Score", "cellb"), _p("", "cellb"),
+             _p("Issues", "cellb"), _p("Worst", "cellb")]]
+    for sys in health.get("systems") or []:
+        score = sys.get("score")
+        worst = sys.get("worst")
+        rows.append([
+            _p(sys["label"], "cell"),
+            Paragraph(escape(f"{score}" if score is not None else "Not assessed"),
+                      ParagraphStyle("sc", parent=ST["cellb"], textColor=_score_color(score))),
+            _bar(score, CONTENT_W * 0.28 - 10),
+            _p(str(sys.get("issues", 0)) if sys.get("assessed") else "—", "cell"),
+            Paragraph(escape(SEV_LABEL.get(worst, "—") if worst else "—"),
+                      ParagraphStyle("wv", parent=ST["cellb"],
+                                     textColor=SEV_COLOR.get(worst, INK_3))),
+        ])
+    table = Table(rows, colWidths=[CONTENT_W * 0.32, CONTENT_W * 0.15, CONTENT_W * 0.28,
+                                   CONTENT_W * 0.10, CONTENT_W * 0.15], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BACKGROUND", (0, 0), (-1, 0), BAND),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (0, -1), 4),
+    ]))
+    flow += [table, Spacer(1, 12)]
+
+    trades = health.get("trades") or []
+    report = payload.get("inspection_report") or {}
+    flow += [_two_col(
+        [_p("Who to call", "h3")] + _bullets([f"{t['trade']} — {t['issues']} issue"
+                                              f"{'s' if t['issues'] != 1 else ''}"
+                                              for t in trades[:8]]),
+        [_p("In good order", "h3")] + _bullets(report.get("strengths") or [], POS),
+    )]
+    return flow
+
+
+def _register(payload: dict, base: Path) -> List:
+    report = payload.get("inspection_report") or {}
+    issues = report.get("issues") or []
+    if not payload.get("health"):
+        return []
+    flow = _section("Defect Register")
+    if not issues:
+        return flow + [_p("No defects were found in the photographs supplied. That is a "
+                          "statement about what was photographed, not a clean bill of "
+                          "health — see the coverage section at the end.", "body")]
+
+    crops = payload.get("crops") or {}
+    names = _labels(payload)
+    img_w = 58 * mm
+    for issue in issues:
+        sev = issue["severity"]
+        head = (f'<font color="{SEV_COLOR[sev].hexval().replace("0x", "#")}"><b>'
+                f'{SEV_LABEL[sev]}</b></font>  ·  {escape(URG_LABEL.get(issue["urgency"], ""))}'
+                f'  ·  {escape(issue.get("trade") or "")}')
+        text = [
+            _raw(f"<b>{escape(issue['id'])}  {escape(issue['title'])}</b>", "h3"),
+            _raw(head, "small"),
+            Spacer(1, 3),
+            _p(issue.get("summary"), "body"),
+            _raw(f"<b>Next step:</b> {escape(issue.get('recommendation') or '—')}", "body"),
+            _p("Seen in: " + ", ".join(names.get(l, l) for l in issue.get("photos") or []),
+               "small"),
+        ]
+        picture = _img(base / crops[issue["id"]], img_w) if issue["id"] in crops else None
+        if picture is not None and picture.drawHeight > 62 * mm:
+            ratio = (62 * mm) / picture.drawHeight
+            picture.drawHeight *= ratio
+            picture.drawWidth *= ratio
+        cells = [[picture or _p("No box drawn", "small"), text]]
+        row = Table(cells, colWidths=[img_w + 6, CONTENT_W - img_w - 6])
+        row.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LINEBEFORE", (0, 0), (0, -1), 2.5, SEV_COLOR[sev]),
+            ("LEFTPADDING", (0, 0), (0, -1), 6), ("LEFTPADDING", (1, 0), (1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        flow += [KeepTogether([row, Spacer(1, 10)])]
+    return flow
+
+
+def _action_plan(payload: dict) -> List:
+    issues = (payload.get("inspection_report") or {}).get("issues") or []
+    if not issues:
+        return []
+    flow = _section("Action Plan")
+    for urgency in ("immediate", "within_6_months", "within_2_years", "monitor"):
+        mine = [i for i in issues if i["urgency"] == urgency]
+        if not mine:
+            continue
+        rows = [[_p(i["id"], "cellb"), _p(i["title"], "cell"), _p(i.get("trade"), "cell"),
+                 Paragraph(SEV_LABEL[i["severity"]],
+                           ParagraphStyle("ap", parent=ST["cellb"],
+                                          textColor=SEV_COLOR[i["severity"]]))]
+                for i in mine]
+        table = Table(rows, colWidths=[CONTENT_W * 0.08, CONTENT_W * 0.52, CONTENT_W * 0.25,
+                                       CONTENT_W * 0.15])
+        table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (0, -1), 0),
+        ]))
+        flow += [_p(URG_LABEL[urgency], "h3"), table, Spacer(1, 10)]
+
+    questions = (payload.get("inspection_report") or {}).get("questions_to_ask") or []
+    if questions:
+        flow += [_p("Questions to ask", "h3")] + _bullets(questions)
+    return flow
+
+
+def _equipment(payload: dict) -> List:
+    items = payload.get("equipment") or []
+    if not items:
+        return []
+    flow = _section("Equipment & Data Plates")
+    rows = [[_p("Equipment", "cellb"), _p("Make / model / serial", "cellb"),
+             _p("Made", "cellb"), _p("Typical life", "cellb"), _p("Status", "cellb")]]
+    for e in items:
+        made = str(e["manufacture_year"]) if e.get("manufacture_year") else "—"
+        if e.get("age_years") is not None:
+            made += f" ({e['age_years']} yrs, {e.get('age_basis')})"
+        life = (f"{e['life_low']}–{e['life_high']} yrs" if e.get("life_low") else "—")
+        status = e.get("status", "unknown")
+        tone = {"past_life": NEG, "replacement_window": WARN, "within_life": POS}.get(status, INK_3)
+        rows.append([
+            _p(e["kind"], "cellb"),
+            _p(" / ".join(x for x in (e.get("brand"), e.get("model"), e.get("serial")) if x)
+               or "Not legible", "cell"),
+            _p(made, "cell"), _p(life, "cell"),
+            Paragraph(escape(STATUS_LABEL.get(status, status)),
+                      ParagraphStyle("st", parent=ST["cellb"], textColor=tone)),
+        ])
+    table = Table(rows, colWidths=[CONTENT_W * 0.2, CONTENT_W * 0.3, CONTENT_W * 0.2,
+                                   CONTENT_W * 0.13, CONTENT_W * 0.17], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 0), (-1, 0), BAND),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (0, -1), 4),
+    ]))
+    return flow + [table, Spacer(1, 6),
+                   _p("Years are transcribed from data plates or decoded from serial formats "
+                      "where the basis says so; confirm before relying on them. Service lives "
+                      "are typical industry ranges, not predictions for this unit.", "small")]
+
+
+def _spaces(payload: dict, base: Path) -> List:
+    report = payload.get("inspection_report") or {}
+    spaces = report.get("spaces") or []
+    photos = {p["label"]: p for p in payload.get("photos") or []}
+    if not spaces or not photos:
+        return []
+    annotated = payload.get("annotated") or {}
+    flow = _section("Rooms & Photo Log")
+    for sp in spaces:
+        entries = []
+        for label in sp["photos"]:
+            p = photos.get(label)
+            if not p:
+                continue
+            name = annotated.get(label) or p.get("thumb") or p.get("file")
+            entries.append((f"{p.get('ref', '')} · {p.get('caption') or p.get('space_label')}"[:60],
+                            name))
+        head = [_raw(f"<b>{escape(sp['name'])}</b>  "
+                     f'<font size="8" color="#9ca3af">{escape(sp.get("condition") or "")}'
+                     f"{'  ·  ' + str(len(sp.get('issues') or [])) + ' issue(s)' if sp.get('issues') else ''}"
+                     f"</font>", "h3"),
+                _p(sp.get("summary"), "small"), Spacer(1, 4)]
+        grid = _image_grid(entries, base, per_row=4, gutter=6)
+        flow += [KeepTogether(head + grid[:1])] + grid[1:] + [Spacer(1, 8)]
+    return flow
+
+
+def _roof(payload: dict, base: Path) -> List:
+    solar = payload.get("solar")
+    if not solar:
+        return []
+    flow = _section("Roof Measurements & Solar Potential")
+    if solar.get("likely_neighbour"):
+        flow += [_callout([_p(f"The nearest building Google has measured is "
+                              f"{solar.get('distance_m')} m from the geocoded point, so these "
+                              "figures may describe a neighbouring roof.", "small")],
+                          border=WARN, fill=colors.HexColor("#fefce8")), Spacer(1, 8)]
+    half = (CONTENT_W - 12) / 2
+    picture = _img(base / payload["satellite_roof"], half) \
+        if payload.get("satellite_roof") else None
+    configs = solar.get("configs") or []
+    best = configs[-1] if configs else None
+    facts = _facts_table([
+        ("Roof area", f"{solar.get('roof_area_m2', 0):,.0f} m²"),
+        ("Roof planes", str(len(solar.get("segments") or []))),
+        ("Max panels", f"{solar.get('max_panels', 0)} × {solar['panel']['capacity_w']} W"),
+        ("Max yearly output", f"{best[1]:,} kWh (DC)" if best else "—"),
+        ("Peak sun", f"{solar.get('max_sunshine_hours', 0):,} h/yr"),
+        ("Imagery", f"{solar.get('imagery_date') or '—'} ({solar.get('imagery_quality') or '—'})"),
+    ], width=half if picture else CONTENT_W)
+    flow += [_two_col([picture] if picture else [], [facts]) if picture else facts,
+             Spacer(1, 10)]
+
+    segs = solar.get("segments") or []
+    if segs:
+        rows = [[_p("Plane", "cellb"), _p("Pitch", "cellb"), _p("Faces", "cellb"),
+                 _p("Area", "cellb"), _p("Median sun", "cellb")]]
+        for n, seg in enumerate(segs, 1):
+            rows.append([_p(str(n), "cell"), _p(f"{seg['pitch']}°", "cell"),
+                         _p(f"{_compass(seg['azimuth'])} ({seg['azimuth']:.0f}°)", "cell"),
+                         _p(f"{seg['area_m2']:,.0f} m²", "cell"),
+                         _p(f"{seg['sunshine_median'] or 0:,.0f} h/yr", "cell")])
+        table = Table(rows, colWidths=[CONTENT_W * 0.1] + [CONTENT_W * 0.225] * 4, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), BAND),
+            ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        flow += [table, Spacer(1, 6)]
+    return flow + [_p("Measured by the Google Solar API from aerial imagery and elevation data. "
+                      "Output is the modelled direct-current yield before inverter and wiring "
+                      "losses.", "small")]
+
+
+def _compass(azimuth: float) -> str:
+    points = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return points[int(((azimuth % 360) + 22.5) // 45) % 8]
+
+
+def _makeovers(payload: dict, base: Path) -> List:
+    made = payload.get("makeovers") or []
+    if not made:
+        return []
+    photos = {p["label"]: p for p in payload.get("photos") or []}
+    flow = _section(f"Reimagined — {payload.get('style_name') or 'Makeovers'}")
+    for i, m in enumerate(made):
+        src = photos.get(m["source"])
+        if not src:
+            continue
+        block = [_p(m.get("title", "").capitalize(), "h3")]
+        if m.get("fixes"):
+            block.append(_p("Also shown repaired: " + "; ".join(m["fixes"]), "small"))
+        block += _image_grid([("CURRENT", src["file"]), ("REIMAGINED", m["after"])], base,
+                             per_row=2)
+        flow += [KeepTogether(block), Spacer(1, 8)]
+    return flow + [_p("AI visualisations of a design direction, not construction drawings.",
+                      "small")]
+
+
+def _listing(payload: dict) -> List:
+    listing = payload.get("listing")
+    if not listing:
+        return []
+    flow = _section("Listing Kit")
+    flow += [_p(listing.get("headline"), "h3"), _p(listing.get("description"), "body"),
+             Spacer(1, 6)]
+    flow += [_two_col(
+        [_p("Highlights", "h3")] + _bullets(listing.get("highlights") or [], POS),
+        [_p("Before the photographer comes", "h3")] + _bullets(listing.get("pre_listing_fixes")
+                                                                or []),
+    )]
+    retake = listing.get("retake") or []
+    if retake:
+        names = _labels(payload)
+        flow += [Spacer(1, 8), _p("Photos to retake", "h3")] + _bullets(
+            [f"{names.get(r['photo'], r['photo'])}: {r['note']}" for r in retake])
+    return flow
+
+
+def _coverage(payload: dict) -> List:
+    health = payload.get("health")
+    if not health:
+        return []
+    report = payload.get("inspection_report") or {}
+    gaps = report.get("coverage_gaps") or []
+    unseen = [s for s in health.get("systems") or [] if not s.get("assessed")]
+    if not gaps and not unseen:
+        return []
+    flow = _section("What the Photos Did Not Show")
+    flow += [_p("A finding-free system is only as good as the photographs behind it. These "
+                "were not covered; adding the shots below and running a new scan completes "
+                "the picture.", "body"), Spacer(1, 6)]
+    rows = [[_p("Area", "cellb"), _p("Why it matters", "cellb"), _p("Photograph to take", "cellb")]]
+    for g in gaps:
+        rows.append([_p(g["area"], "cellb"), _p(g.get("why"), "cell"), _p(g.get("shot"), "cell")])
+    covered = {g["area"].lower() for g in gaps}
+    for s in unseen:
+        if s["label"].lower() not in covered:
+            rows.append([_p(s["label"], "cellb"), _p("No photograph showed this system.", "cell"),
+                         _p(s.get("shot"), "cell")])
+    table = Table(rows, colWidths=[CONTENT_W * 0.24, CONTENT_W * 0.36, CONTENT_W * 0.4],
+                  repeatRows=1)
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 0), (-1, 0), BAND),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (0, -1), 4),
+    ]))
+    return flow + [table]
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 def build_pdf(output_path: Path, payload: dict, image_dir: Path) -> Path:
     """Render `payload` (the run_scan result) to a PDF at `output_path`."""
@@ -594,10 +1048,22 @@ def build_pdf(output_path: Path, payload: dict, image_dir: Path) -> Path:
     # The cover carries no footer; every page after it does.
     story += [NextPageTemplate("main")]
 
-    for section in (_condition(payload),
-                    _perspectives(payload, image_dir),
-                    _temporal(payload, image_dir),
-                    _renovation(payload, image_dir)):
+    sections = (
+        _inspection_summary(payload),
+        _register(payload, image_dir),
+        _action_plan(payload),
+        _equipment(payload),
+        _spaces(payload, image_dir),
+        _roof(payload, image_dir),
+        _condition(payload),
+        _perspectives(payload, image_dir),
+        _temporal(payload, image_dir),
+        _makeovers(payload, image_dir),
+        _renovation(payload, image_dir),
+        _listing(payload),
+        _coverage(payload),
+    )
+    for section in sections:
         if section:
             story += [PageBreak()] + section
 
@@ -605,11 +1071,13 @@ def build_pdf(output_path: Path, payload: dict, image_dir: Path) -> Path:
         Spacer(1, 14), _rule(0, 6),
         _p("Generated by NexGen Property Intelligence from public satellite and Street View "
            "imagery together with any photographs supplied with the scan. Every finding "
-           "here is read from those images and limited by what they show. Condition "
-           "scores and renovation scopes are AI-generated assessments for screening "
-           "purposes only — not a survey, an appraisal, or a contractor quote. No figure "
-           "in this report is a valuation, a price or a return: photographs cannot "
-           "support those, so none are offered.", "small"),
+           "here is read from those images and limited by what they show; roof geometry "
+           "and solar figures come from the Google Solar API where available. Condition "
+           "scores, the health score and renovation scopes are AI-assisted assessments for "
+           "screening purposes only — not a survey, an appraisal, a structural report or "
+           "a contractor quote. Equipment ages are read from data plates and should be "
+           "confirmed. No figure in this report is a valuation, a price or a return: "
+           "photographs cannot support those, so none are offered.", "small"),
     ]
 
     doc.build(story)

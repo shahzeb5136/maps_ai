@@ -9,6 +9,6 @@ The API layer in `api/` owns credits, auth and storage; this package owns
 Google Maps, Gemini and the report.
 """
 
-from .pipeline import ScanFailed, run_scan
+from .pipeline import ScanFailed, ScanOptions, run_scan
 
-__all__ = ["run_scan", "ScanFailed"]
+__all__ = ["run_scan", "ScanFailed", "ScanOptions"]

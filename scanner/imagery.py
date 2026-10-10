@@ -19,11 +19,22 @@ except ImportError:  # temporal module degrades to a no-op without it
     HAS_PANO_SEARCH = False
 
 
-def fetch_satellite_image(address: str, api_key: str, zoom: int = 20,
-                          size: str = "640x640") -> Image.Image:
+# The satellite plate's framing. Fixed, because the browser and the PDF both
+# project roof geometry onto it with Web Mercator arithmetic that assumes it.
+SATELLITE_ZOOM = 20
+SATELLITE_SIZE = 640
+
+
+def fetch_satellite_image(address: str, api_key: str, zoom: int = SATELLITE_ZOOM,
+                          size: str = f"{SATELLITE_SIZE}x{SATELLITE_SIZE}",
+                          center: Optional[Tuple[float, float]] = None) -> Image.Image:
+    # Centred on the geocoded point when we have it, so a lat/lng can be mapped
+    # to a pixel exactly; Google re-geocoding the address string would usually
+    # land on the same spot, but "usually" is not good enough to draw on.
+    where = f"{center[0]:.7f},{center[1]:.7f}" if center else address
     resp = requests.get(
         "https://maps.googleapis.com/maps/api/staticmap",
-        params={"center": address, "zoom": zoom, "size": size,
+        params={"center": where, "zoom": zoom, "size": size,
                 "maptype": "satellite", "key": api_key},
         timeout=30,
     )
@@ -58,13 +69,16 @@ def fetch_street_view(api_key: str, heading: int, location: Optional[str] = None
 
 def download_all_property_perspectives(address: str, api_key: str,
                                        facade_heading: Optional[int],
-                                       meta: Optional[dict]) -> Dict[str, Image.Image]:
+                                       meta: Optional[dict],
+                                       center: Optional[Tuple[float, float]] = None,
+                                       ) -> Dict[str, Image.Image]:
     """Satellite + 4 street angles orbiting the facade heading."""
     if not meta:
         log.warning("No Street View coverage for '%s'. Satellite only.", address)
 
     images: Dict[str, Image.Image] = {}
-    tasks = {"satellite_topdown": lambda: fetch_satellite_image(address, api_key)}
+    tasks = {"satellite_topdown": lambda: fetch_satellite_image(address, api_key,
+                                                                center=center)}
 
     if meta:
         pano_id = meta.get("pano_id")

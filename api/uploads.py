@@ -14,6 +14,7 @@ GPS coordinates of the photographer's home), and no 20-megapixel originals
 inflating the vision-model bill.
 """
 
+import asyncio
 import io
 import logging
 from pathlib import Path
@@ -25,10 +26,21 @@ from . import config
 
 log = logging.getLogger(__name__)
 
+# iPhones shoot HEIC by default, and a browser that cannot decode it cannot
+# downscale it either, so these arrive as-is. pillow-heif teaches PIL to read
+# them; without it they are refused with the usual message.
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    HEIF = {"HEIF"}
+except Exception:  # noqa: BLE001 - optional dependency
+    HEIF = set()
+
 # Formats we will decode. A file claiming any other type is rejected before PIL
 # is asked to parse it.
-ACCEPTED = {"JPEG", "PNG", "WEBP", "BMP", "GIF"}
-ACCEPTED_HINT = "JPEG, PNG or WebP"
+ACCEPTED = {"JPEG", "PNG", "WEBP", "BMP", "GIF", "MPO"} | HEIF
+ACCEPTED_HINT = "JPEG, PNG, WebP or HEIC" if HEIF else "JPEG, PNG or WebP"
 
 # Pillow warns above ~89 megapixels and raises above twice that. Neither is a
 # useful ceiling for a phone photo, and a crafted file that decompresses to
@@ -66,8 +78,14 @@ async def _read_bounded(upload, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def _normalise(raw: bytes, label: str) -> bytes:
-    """Decode, orient, bound, re-encode as JPEG. Returns the new file's bytes."""
+# Edge of the thumbnail written beside each upload. The live feed shows every
+# photo while the scan runs, and fifty full-size images is a lot to pull to
+# draw fifty small squares.
+THUMB_EDGE = 480
+
+
+def _normalise(raw: bytes, label: str) -> Tuple[bytes, bytes]:
+    """Decode, orient, bound, re-encode as JPEG. Returns (photo, thumbnail) bytes."""
     try:
         with Image.open(io.BytesIO(raw)) as probe:
             fmt = (probe.format or "").upper()
@@ -97,10 +115,14 @@ def _normalise(raw: bytes, label: str) -> bytes:
 
     out = io.BytesIO()
     image.save(out, "JPEG", quality=88, optimize=True)
-    return out.getvalue()
+
+    image.thumbnail((THUMB_EDGE, THUMB_EDGE), Image.LANCZOS)
+    thumb = io.BytesIO()
+    image.save(thumb, "JPEG", quality=82, optimize=True)
+    return out.getvalue(), thumb.getvalue()
 
 
-async def collect(uploads: Sequence) -> List[Tuple[str, bytes]]:
+async def collect(uploads: Sequence) -> List[Tuple[str, bytes, bytes]]:
     """
     Validate and normalise every attachment, in memory.
 
@@ -118,7 +140,7 @@ async def collect(uploads: Sequence) -> List[Tuple[str, bytes]]:
         )
 
     limit = int(config.MAX_UPLOAD_MB * 1024 * 1024)
-    out: List[Tuple[str, bytes]] = []
+    out: List[Tuple[str, bytes, bytes]] = []
 
     for i, upload in enumerate(files, start=1):
         label = upload.filename or f"Image {i}"
@@ -126,17 +148,22 @@ async def collect(uploads: Sequence) -> List[Tuple[str, bytes]]:
         if not raw:
             raise UploadRejected(f"{label} is empty.")
         # The raw bytes go out of scope each iteration, so peak memory is one
-        # original plus the normalised set, not every original at once.
-        out.append((f"owner_photo_{i}.jpg", _normalise(raw, label)))
+        # original plus the normalised set, not every original at once. Decoding
+        # is CPU work — half a second for a HEIC — so it runs off the event loop,
+        # or fifty of them would stall every other request for half a minute.
+        photo, thumb = await asyncio.to_thread(_normalise, raw, label)
+        out.append((f"owner_photo_{i}.jpg", photo, thumb))
         log.info("Accepted attachment %s (%d KB -> %d KB)",
-                 label, len(raw) // 1024, len(out[-1][1]) // 1024)
+                 label, len(raw) // 1024, len(photo) // 1024)
 
     return out
 
 
-def write(files: Sequence[Tuple[str, bytes]], dest: Path) -> List[str]:
-    """Write collected attachments into a scan directory. Returns their names."""
+def write(files: Sequence[Tuple[str, bytes, bytes]], dest: Path) -> List[str]:
+    """Write collected attachments (and their thumbnails) into a scan directory.
+    Returns the photos' names."""
     dest.mkdir(parents=True, exist_ok=True)
-    for name, blob in files:
+    for name, blob, thumb in files:
         (dest / name).write_bytes(blob)
-    return [name for name, _ in files]
+        (dest / f"thumb_{name}").write_bytes(thumb)
+    return [name for name, _, _ in files]

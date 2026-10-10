@@ -61,8 +61,17 @@ def _signature(scan_id: str, filename: str, expires: int) -> str:
 
 
 def sign(scan_id: str, filename: str, ttl: Optional[int] = None) -> str:
-    """Absolute, signed, time-limited URL for one artifact."""
-    expires = int(time.time()) + (ttl or config.SIGNED_URL_TTL_SECONDS)
+    """
+    Absolute, signed, time-limited URL for one artifact.
+
+    The expiry is rounded up to the next whole hour, so every request within
+    that hour signs to the identical URL. The page polls every few seconds
+    while a scan runs; with a fresh expiry each time, every poll would hand
+    the browser fifty new image URLs and it would fetch them all again.
+    Every link still lives at least `ttl`.
+    """
+    floor = int(time.time()) + (ttl or config.SIGNED_URL_TTL_SECONDS)
+    expires = (floor // 3600 + 1) * 3600
     sig = _signature(scan_id, filename, expires)
     path = (
         f"/api/scans/{quote(scan_id)}/files/{quote(filename)}"

@@ -166,13 +166,21 @@ def _section(title: str) -> List:
 
 
 # ── Images ───────────────────────────────────────────────────────────────────
-def _img(path: Path, width: float) -> Optional[RLImage]:
-    """Scaled to `width`, keeping the source aspect ratio."""
+def _img(path: Path, width: float, max_height: Optional[float] = None) -> Optional[RLImage]:
+    """Scaled to `width`, keeping the source aspect ratio, and no taller than
+    `max_height` (default: most of a page) — a very tall photo would otherwise
+    raise a LayoutError and lose the whole PDF."""
     if not path.exists():
         return None
     try:
         iw, ih = ImageReader(str(path)).getSize()
-        return RLImage(str(path), width=width, height=width * (ih / iw))
+        if not iw or not ih:
+            return None
+        w, h = width, width * (ih / iw)
+        cap = max_height or 150 * mm
+        if h > cap:
+            w, h = w * cap / h, cap
+        return RLImage(str(path), width=w, height=h)
     except Exception as exc:
         log.warning("Could not embed %s in the PDF: %s", path.name, exc)
         return None
@@ -184,7 +192,7 @@ def _image_grid(entries: List[tuple], base: Path, per_row: int = 2,
     cell_w = (CONTENT_W - gutter * (per_row - 1)) / per_row
     cells = []
     for caption, filename in entries:
-        picture = _img(base / filename, cell_w)
+        picture = _img(base / filename, cell_w, max_height=min(cell_w * 1.6, 110 * mm))
         if picture is None:
             continue
         block = Table([[picture], [_p(caption, "caption")]], colWidths=[cell_w])
@@ -738,14 +746,14 @@ def _inspection_summary(payload: dict) -> List:
             _p(sys["label"], "cell"),
             Paragraph(escape(f"{score}" if score is not None else "Not assessed"),
                       ParagraphStyle("sc", parent=ST["cellb"], textColor=_score_color(score))),
-            _bar(score, 60 * mm),
+            _bar(score, CONTENT_W * 0.28 - 10),
             _p(str(sys.get("issues", 0)) if sys.get("assessed") else "—", "cell"),
             Paragraph(escape(SEV_LABEL.get(worst, "—") if worst else "—"),
                       ParagraphStyle("wv", parent=ST["cellb"],
                                      textColor=SEV_COLOR.get(worst, INK_3))),
         ])
-    table = Table(rows, colWidths=[CONTENT_W * 0.34, CONTENT_W * 0.16, 64 * mm,
-                                   CONTENT_W * 0.08, CONTENT_W * 0.14 - 4], repeatRows=1)
+    table = Table(rows, colWidths=[CONTENT_W * 0.32, CONTENT_W * 0.15, CONTENT_W * 0.28,
+                                   CONTENT_W * 0.10, CONTENT_W * 0.15], repeatRows=1)
     table.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND", (0, 0), (-1, 0), BAND),

@@ -41,8 +41,8 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SCANS_DIR", tmp_path / "scans")
     fake = fakes.FakeClient()
     fake.models = SlowModels()
-    monkeypatch.setattr(analysis, "make_client", lambda key: fake)
-    monkeypatch.setattr(main, "make_client", lambda key: fake)
+    monkeypatch.setattr(analysis, "make_client", lambda *a, **k: fake)
+    monkeypatch.setattr(main, "make_client", lambda *a, **k: fake)
     monkeypatch.setattr(main, "_client", None)
     fakes.patch_network(monkeypatch)
     main.app.dependency_overrides[current_user] = lambda: USER
@@ -203,3 +203,22 @@ def test_json_submission_still_works(api):
 def test_insufficient_credits(api):
     api.sql("UPDATE users SET credits = 0 WHERE id = $1 RETURNING 1", USER)
     assert api.post("/api/scans", data={"address": "1 Test Street"}).status_code == 402
+
+
+def test_failed_renders_hit_a_hard_ceiling(api, monkeypatch):
+    """Refusals do not use the allowance, but cannot be retried for ever."""
+    from scanner import gemini as gem
+    res = api.post("/api/scans", json={"address": "1 Test Street"})
+    sid = res.json()["scan"]["id"]
+    _wait(api, sid)
+    monkeypatch.setattr(config, "RENDER_LIMIT_PER_SCAN", 1)
+    monkeypatch.setattr(gem, "edit_image", lambda *a, **k: None)
+    body = {"source": "street_facade_front", "mode": "twilight"}
+    assert api.post(f"/api/scans/{sid}/renders", json=body).status_code == 502
+    assert api.post(f"/api/scans/{sid}/renders", json=body).status_code == 502
+    assert api.post(f"/api/scans/{sid}/renders", json=body).status_code == 429
+
+
+def test_signed_urls_are_stable_within_the_hour(api):
+    from api import storage
+    assert storage.sign("abc", "x.jpg") == storage.sign("abc", "x.jpg")

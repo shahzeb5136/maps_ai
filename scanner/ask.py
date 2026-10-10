@@ -110,8 +110,9 @@ def answer(client: genai.Client, question: str, payload: dict,
     }
 
 
-def load_images(scan_dir, payload: dict) -> Dict[str, Image.Image]:
-    """Every image the scan holds, by label: owner photos first, then Google."""
+def load_images(scan_dir, payload: dict, edge: int = ASK_EDGE) -> Dict[str, Image.Image]:
+    """Every image the scan holds, by label, already downscaled to `edge`:
+    fifty full-size photos per question would be ~300 MB of pixels."""
     files: Dict[str, str] = {}
     for p in payload.get("photos") or []:
         if p.get("file"):
@@ -124,9 +125,14 @@ def load_images(scan_dir, payload: dict) -> Dict[str, Image.Image]:
         path = scan_dir / name
         try:
             with Image.open(path) as img:
-                out[label] = img.convert("RGB")
+                img.draft("RGB", (edge, edge))     # JPEG decodes at reduced scale
+                small = img.convert("RGB")
+                small.thumbnail((edge, edge), Image.LANCZOS)
+                out[label] = small
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not open %s for Q&A: %s", path, exc)
+        if len(out) >= MAX_IMAGES:
+            break
     return out
 
 

@@ -20,6 +20,7 @@ Endpoints (all but /health and the signed file route require a Clerk bearer toke
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -443,17 +444,49 @@ async def get_file(scan_id: str, filename: str, expires: int = Query(...),
 # ── After the scan: ask, and the studio ─────────────────────────────────────
 # Both run a model call inside the request — 5-40 seconds — rather than through
 # the job queue: they are short enough to wait for, and the user is watching.
-# Service-wide semaphores keep a burst of users from exhausting the quota.
+#
+# They run on their own thread pool, not the default one the scans use, so a
+# burst of questions can never leave a queued scan waiting for a thread while
+# its clock runs. Service-wide semaphores bound how many run at once, and a
+# slot is only released when the work has actually finished: if the request
+# gives up first, the thread is still billing Gemini and still counts.
 _ask_slots = asyncio.Semaphore(config.MAX_CONCURRENT_ASKS)
 _render_slots = asyncio.Semaphore(config.MAX_CONCURRENT_RENDERS)
+_interactive_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=config.MAX_CONCURRENT_ASKS + config.MAX_CONCURRENT_RENDERS,
+    thread_name_prefix="interactive",
+)
 _client = None
+
+# A user is waiting on these, so a single hung call is cut off sooner than in
+# a scan (where waiting out a slow call beats losing the stage).
+INTERACTIVE_TIMEOUT_SECONDS = 75
 
 
 def _gemini():
     global _client
     if _client is None:
-        _client = make_client(scanner_config.GEMINI_API_KEY)
+        _client = make_client(scanner_config.GEMINI_API_KEY, INTERACTIVE_TIMEOUT_SECONDS)
     return _client
+
+
+async def _run_held(slots: asyncio.Semaphore, fn, timeout: float):
+    """
+    Run `fn` on the interactive pool under `slots`, waiting at most `timeout`.
+
+    On timeout the caller gets asyncio.TimeoutError, but the slot stays taken
+    until the thread really finishes — otherwise the concurrency cap would
+    only bound the requests, not the work.
+    """
+    await slots.acquire()
+    loop = asyncio.get_running_loop()
+    try:
+        fut = loop.run_in_executor(_interactive_pool, fn)
+    except Exception:
+        slots.release()
+        raise
+    fut.add_done_callback(lambda _: slots.release())
+    return await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
 
 
 async def _completed_scan(scan_id: str, user_id: str) -> dict:
@@ -518,15 +551,14 @@ async def ask_scan(scan_id: str, body: AskBody, user_id: str = Depends(current_u
         if r["status"] == db.COMPLETED
     ]
 
+    scan_dir = storage.scan_dir(scan_id)
+
+    def work():
+        images = ask_stage.load_images(scan_dir, payload)
+        return ask_stage.answer(_gemini(), question, payload, images, history)
+
     try:
-        async with _ask_slots:
-            images = await asyncio.to_thread(ask_stage.load_images,
-                                             storage.scan_dir(scan_id), payload)
-            answer = await asyncio.wait_for(
-                asyncio.to_thread(ask_stage.answer, _gemini(), question, payload, images,
-                                  history),
-                timeout=150,
-            )
+        answer = await _run_held(_ask_slots, work, timeout=150)
     except Exception as exc:  # noqa: BLE001
         log.warning("Question on scan %s failed: %s", scan_id, exc)
         await db.fail_question(question_id, "Could not answer just now.")
@@ -631,21 +663,19 @@ async def create_render(scan_id: str, body: RenderBody, user_id: str = Depends(c
     text = makeovers.instruction(mode, meta["space"], meta["is_exterior"], style,
                                  meta["defects"], instruction)
     scan_dir = storage.scan_dir(scan_id)
-    try:
-        async with _render_slots:
-            source = await asyncio.to_thread(ask_stage.image_for, scan_dir, payload,
-                                             body.source)
-            if source is None:
-                raise RuntimeError("source image missing")
-            image = await asyncio.wait_for(
-                asyncio.to_thread(makeovers.render, _gemini(), source, text,
-                                  f"studio {mode}"),
-                timeout=180,
-            )
+    name = f"studio_{render_id}.jpg"
+
+    def work():
+        source = ask_stage.image_for(scan_dir, payload, body.source)
+        if source is None:
+            raise RuntimeError("source image missing")
+        image = makeovers.render(_gemini(), source, text, f"studio {mode}")
         if image is None:
             raise RuntimeError("no image returned")
-        name = f"studio_{render_id}.jpg"
-        await asyncio.to_thread(image.save, scan_dir / name, "JPEG", quality=92)
+        image.save(scan_dir / name, "JPEG", quality=92)
+
+    try:
+        await _run_held(_render_slots, work, timeout=180)
     except Exception as exc:  # noqa: BLE001
         log.warning("Studio render on scan %s failed: %s", scan_id, exc)
         await db.fail_render(render_id, "The image model did not return a render.")
@@ -655,4 +685,7 @@ async def create_render(scan_id: str, body: RenderBody, user_id: str = Depends(c
 
     await db.finish_render(render_id, name)
     row = await db.get_render(render_id, user_id)
+    if row is None:
+        # The scan was deleted while the render was being made.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Scan not found.")
     return _render_out(row)

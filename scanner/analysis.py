@@ -39,8 +39,8 @@ log = logging.getLogger(__name__)
 NO_AFC = gemini.NO_AFC
 
 
-def make_client(api_key: str) -> genai.Client:
-    return gemini.make_client(api_key)
+def make_client(api_key: str, timeout_seconds=None) -> genai.Client:
+    return gemini.make_client(api_key, timeout_seconds)
 
 
 # ── 1. Base inspection ───────────────────────────────────────────────────────

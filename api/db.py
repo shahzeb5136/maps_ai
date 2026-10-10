@@ -22,6 +22,13 @@ log = logging.getLogger(__name__)
 
 _pool: Optional[asyncpg.Pool] = None
 
+
+def _dumps(value: Any) -> str:
+    """JSON for a jsonb column. Postgres refuses \\u0000 in jsonb, and model
+    text can carry a stray NUL; letting it through would fail a finished scan
+    at the last step."""
+    return json.dumps(value).replace("\\u0000", "")
+
 # Statuses a scan can hold. `queued` exists for the brief window between the
 # credit being taken and the worker picking the job up.
 QUEUED, RUNNING, COMPLETED, FAILED = "queued", "running", "completed", "failed"
@@ -278,7 +285,7 @@ async def set_live(scan_id: str, state: Dict[str, Any]) -> None:
         WHERE id = $1 AND status = 'running'
           AND (live_json IS NULL OR COALESCE((live_json->>'v')::int, 0) < $3)
         """,
-        scan_id, json.dumps(state), int(state.get("v", 0)),
+        scan_id, _dumps(state), int(state.get("v", 0)),
     )
 
 
@@ -293,7 +300,7 @@ async def mark_completed(scan_id: str, result: Dict[str, Any]) -> None:
             live_json = NULL
         WHERE id = $1
         """,
-        scan_id, COMPLETED, json.dumps(result),
+        scan_id, COMPLETED, _dumps(result),
     )
 
 
@@ -395,6 +402,11 @@ async def _claim(table: str, scan_id: str, user_id: str, limit: int,
 
     The scan row is locked first, so two simultaneous requests cannot both
     see one slot left and both take it.
+
+    Failed attempts do not use up the allowance — a refusal or a timeout is
+    our problem, not the user's — but they do count towards a hard ceiling of
+    twice the allowance, or a prompt the model always refuses could be retried
+    for ever on one credit.
     """
     row_id = uuid.uuid4().hex
     async with pool().acquire() as con:
@@ -405,11 +417,12 @@ async def _claim(table: str, scan_id: str, user_id: str, limit: int,
             )
             if scan is None or scan["status"] != COMPLETED:
                 raise ScanNotReady()
-            used = await con.fetchval(
-                f"SELECT count(*) FROM {table} WHERE scan_id = $1 AND status <> 'failed'",
+            used, attempts = await con.fetchrow(
+                f"SELECT count(*) FILTER (WHERE status <> 'failed'), count(*) "
+                f"FROM {table} WHERE scan_id = $1",
                 scan_id,
             )
-            if used >= limit:
+            if used >= limit or attempts >= limit * 2:
                 raise LimitReached()
             names = ["id", "scan_id", "user_id", "status", *columns]
             values = [row_id, scan_id, user_id, RUNNING, *columns.values()]
@@ -436,7 +449,7 @@ async def finish_question(question_id: str, answer: Dict[str, Any]) -> None:
     await pool().execute(
         "UPDATE property_scan_questions SET status = $2, answer_json = $3::jsonb "
         "WHERE id = $1",
-        question_id, COMPLETED, json.dumps(answer),
+        question_id, COMPLETED, _dumps(answer),
     )
 
 

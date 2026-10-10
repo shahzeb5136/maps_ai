@@ -219,6 +219,12 @@ class FakeModels:
 
     def generate_content(self, model=None, contents=None, config=None):
         contents = list(contents or [])
+        self.mimes = [getattr(getattr(c, "inline_data", None), "mime_type", None)
+                      for c in contents if not isinstance(c, str)]
+        # Images arrive as encoded parts; decode them back for the fake render.
+        contents = [Image.open(io.BytesIO(c.inline_data.data)).convert("RGB")
+                    if getattr(getattr(c, "inline_data", None), "data", None) else c
+                    for c in contents]
         schema = getattr(config, "response_schema", None) if config is not None else None
         if schema is None:
             self.calls.append("image")

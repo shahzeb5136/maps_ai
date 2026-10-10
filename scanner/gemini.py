@@ -39,10 +39,11 @@ class EmptyResponse(Exception):
     """The model returned no usable content (often a safety block)."""
 
 
-def make_client(api_key: str) -> genai.Client:
+def make_client(api_key: str, timeout_seconds: Optional[int] = None) -> genai.Client:
     return genai.Client(
         api_key=api_key,
-        http_options=types.HttpOptions(timeout=config.GEMINI_TIMEOUT_SECONDS * 1000),
+        http_options=types.HttpOptions(
+            timeout=(timeout_seconds or config.GEMINI_TIMEOUT_SECONDS) * 1000),
     )
 
 
@@ -60,10 +61,29 @@ def _sleep(attempt: int) -> None:
     time.sleep(min(30.0, (2 ** attempt) * 1.6 + random.uniform(0.2, 1.2)))
 
 
+def jpeg_part(image: Image.Image, quality: int = 88) -> types.Part:
+    """An image as a JPEG part.
+
+    The SDK sends a PIL image as JPEG only if it is an untouched JPEG straight
+    from disk; anything converted, copied or resized goes as PNG, five to ten
+    times larger. Every image this pipeline sends has been through one of
+    those, so left alone a fifty-photo request would run past Gemini's inline
+    size limit and fail. Encoding here keeps every request a JPEG request.
+    """
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, "JPEG", quality=quality, optimize=True)
+    return types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
+
+
+def _encode(contents: List[Any]) -> List[Any]:
+    return [jpeg_part(c) if isinstance(c, Image.Image) else c for c in contents]
+
+
 def call(client: genai.Client, model: str, contents: List[Any],
          cfg: Optional[types.GenerateContentConfig] = None, label: str = ""):
     """generate_content with retries on transient failures."""
     attempts = config.GEMINI_ATTEMPTS
+    contents = _encode(contents)
     for attempt in range(attempts):
         try:
             return client.models.generate_content(model=model, contents=contents, config=cfg)

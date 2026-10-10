@@ -109,3 +109,21 @@ def test_media_resolution_rejection_falls_back():
                             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW)
     assert out.answer == "ok"
     assert seen[0] is not None and seen[-1] is None
+
+
+def test_images_are_sent_as_jpeg():
+    """The SDK would send a converted PIL image as PNG, 5-10x larger."""
+    from types import SimpleNamespace
+
+    from scanner import gemini
+    from tests import fakes
+
+    models = fakes.FakeModels()
+    gemini.call(SimpleNamespace(models=models), "m",
+                ["IMAGE owner_photo_1", fakes.make_photo(1).convert("RGB").copy(), "text"])
+    assert models.mimes == ["image/jpeg"]
+
+
+def test_nul_characters_are_stripped_before_jsonb():
+    from api.db import _dumps
+    assert "\\u0000" not in _dumps({"title": "Crack\x00 in wall"})

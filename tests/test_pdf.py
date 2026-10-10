@@ -53,3 +53,23 @@ def test_photo_only_payload_without_exterior_survey(tmp_path):
     }
     out = build_pdf(tmp_path / "r.pdf", payload, tmp_path)
     assert out.stat().st_size > 5_000
+
+
+def test_very_tall_photo_does_not_lose_the_pdf(tmp_path):
+    """A 300x1600 photo in a 2-up grid used to raise LayoutError."""
+    from PIL import Image
+    Image.new("RGB", (300, 1600), (120, 120, 120)).save(tmp_path / "owner_photo_1.jpg")
+    Image.new("RGB", (300, 1600), (90, 120, 160)).save(tmp_path / "makeover_1.jpg")
+    photo = {**fakes.photo_inspection("owner_photo_1"), "label": "owner_photo_1", "ref": "P01",
+             "source": "owner", "file": "owner_photo_1.jpg", "thumb": None, "width": 300,
+             "height": 1600, "findings": [], "equipment": [], "error": None}
+    payload = {
+        "address": "Tall House", "scanned_at": "2026-01-01T00:00:00+00:00", "coordinates": None,
+        "imagery": {"owner_photo_1": "owner_photo_1.jpg"}, "timeline": [], "inspection": None,
+        "temporal_analysis": None, "renovation": None, "pdf": None, "version": 2,
+        "photos": [photo], "style_name": "Japandi",
+        "makeovers": [{"source": "owner_photo_1", "space": "Hall", "style": "japandi",
+                       "style_name": "Japandi", "title": "Japandi hall", "fixes": [],
+                       "after": "makeover_1.jpg"}],
+    }
+    assert build_pdf(tmp_path / "r.pdf", payload, tmp_path).exists()

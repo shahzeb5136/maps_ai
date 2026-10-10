@@ -106,7 +106,17 @@ def structured(client: genai.Client, schema: Type[T], contents: List[Any], *,
     # Malformed replies get one extra try on top of the transport retries in
     # call(): a different sample usually parses.
     for attempt in range(2):
-        resp = call(client, model or config.TEXT_MODEL, contents, cfg, label)
+        try:
+            resp = call(client, model or config.TEXT_MODEL, contents, cfg, label)
+        except errors.ClientError as exc:
+            # media_resolution is a cost knob, not a correctness one. A model
+            # that does not accept it should cost us the saving, not the call.
+            if cfg.media_resolution is None or getattr(exc, "code", None) != 400:
+                raise
+            log.warning("Gemini %s rejected media_resolution (%s); retrying without it",
+                        label or schema.__name__, exc)
+            cfg = cfg.model_copy(update={"media_resolution": None})
+            resp = call(client, model or config.TEXT_MODEL, contents, cfg, label)
         text = getattr(resp, "text", None)
         if not text:
             last = EmptyResponse(f"{label or schema.__name__}: model returned no content")

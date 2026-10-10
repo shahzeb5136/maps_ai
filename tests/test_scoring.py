@@ -82,3 +82,30 @@ def test_equipment_age():
     assert future["manufacture_year"] == 0
     solar = equipment_age({"kind": "Solar panel array", "manufacture_year": 2020}, 2026)
     assert solar["life_label"] == "Solar panels"
+
+
+def test_media_resolution_rejection_falls_back():
+    """A model that refuses media_resolution still answers, without it."""
+    import json
+    from types import SimpleNamespace
+
+    from google.genai import errors, types
+
+    from scanner import gemini
+    from scanner.models import AskAnswer
+
+    seen = []
+
+    class Models:
+        def generate_content(self, model=None, contents=None, config=None):
+            seen.append(config.media_resolution)
+            if config.media_resolution is not None:
+                raise errors.ClientError(400, {"error": {"code": 400, "message": "bad field",
+                                                         "status": "INVALID_ARGUMENT"}})
+            return SimpleNamespace(text=json.dumps({"answer": "ok", "confidence": "high",
+                                                    "citations": [], "follow_ups": []}))
+
+    out = gemini.structured(SimpleNamespace(models=Models()), AskAnswer, ["q"],
+                            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW)
+    assert out.answer == "ok"
+    assert seen[0] is not None and seen[-1] is None

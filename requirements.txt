@@ -12,6 +12,8 @@ python-dotenv>=1.0,<2.0
 google-genai>=2.0,<3.0
 requests>=2.32,<3.0
 pillow>=11.0,<14.0
+# HEIC/HEIF — what iPhones shoot by default. Binary wheels, no system libraries.
+pillow-heif>=1.1,<2.0
 pydantic>=2.9,<3.0
 streetview>=0.1.0,<0.2
 

@@ -108,4 +108,38 @@ def sign_payload(scan_id: str, payload: dict) -> dict:
         }
 
     signed["pdf_url"] = sign(scan_id, payload["pdf"]) if payload.get("pdf") else None
+
+    # ── Inspection layer (version 2 payloads) ──
+    def maybe(name):
+        return sign(scan_id, name) if name else None
+
+    if payload.get("photos"):
+        signed["photos"] = [
+            {**p, "url": maybe(p.get("file")), "thumb_url": maybe(p.get("thumb"))}
+            for p in payload["photos"]
+        ]
+    if payload.get("makeovers"):
+        signed["makeovers"] = [
+            {**m, "after_url": maybe(m.get("after"))} for m in payload["makeovers"]
+        ]
+    # PDF-only derivatives. The browser draws its own from the originals.
+    for key in ("annotated", "crops", "satellite_roof"):
+        signed.pop(key, None)
     return signed
+
+
+def sign_live(scan_id: str, live: dict) -> dict:
+    """
+    The live feed with a URL for every image already on disk.
+
+    Owner photos land at upload time, with a thumbnail beside them; Google's
+    plates land once fetched. An image that is not there yet simply has no URL
+    and the browser shows a placeholder until the next poll.
+    """
+    urls = {}
+    for label in live.get("order") or []:
+        for name in (f"thumb_{label}.jpg", f"{label}.jpg"):
+            if resolve(scan_id, name) is not None:
+                urls[label] = sign(scan_id, name)
+                break
+    return {**live, "urls": urls}

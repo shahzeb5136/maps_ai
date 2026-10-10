@@ -12,7 +12,6 @@ its phrasing.
 """
 
 import concurrent.futures
-import io
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -20,7 +19,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
-from . import config
+from . import config, gemini
 from .imagery import (
     OWNER_PREFIX,
     has_ground_imagery,
@@ -37,11 +36,11 @@ from .models import (
 log = logging.getLogger(__name__)
 
 # Gemini would otherwise try to call our pydantic models as tools.
-NO_AFC = types.AutomaticFunctionCallingConfig(disable=True)
+NO_AFC = gemini.NO_AFC
 
 
 def make_client(api_key: str) -> genai.Client:
-    return genai.Client(api_key=api_key)
+    return gemini.make_client(api_key)
 
 
 # ── 1. Base inspection ───────────────────────────────────────────────────────
@@ -105,10 +104,9 @@ given above. Return strict JSON per the schema.
             "condition. Leave facade-dependent fields empty or explicitly marked unknown."
         )
 
-    resp = client.models.generate_content(
-        model=config.TEXT_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
+    resp = gemini.call(
+        client, config.TEXT_MODEL, contents,
+        types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=PropertyInspectionReport,
             temperature=0.1,
@@ -143,10 +141,9 @@ between captures - if that makes a comparison unreliable, say so rather than inv
 change. Return strict JSON per the schema.
 """)
 
-    resp = client.models.generate_content(
-        model=config.TEXT_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
+    resp = gemini.call(
+        client, config.TEXT_MODEL, contents,
+        types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=TemporalAnalysis,
             temperature=0.1,
@@ -251,10 +248,9 @@ Return strict JSON per the schema.
 """
     contents.append(prompt)
 
-    resp = client.models.generate_content(
-        model=config.TEXT_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
+    resp = gemini.call(
+        client, config.TEXT_MODEL, contents,
+        types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=RenovationConcepts,
             temperature=0.6,          # higher: we want the three to diverge
@@ -272,17 +268,8 @@ def render_variant(facade: Image.Image, variant: RenovationVariant,
         "focal length, building geometry, roofline, window openings and background. "
         "Photorealistic architectural photography, natural daylight, no text or watermarks."
     )
-    try:
-        resp = client.models.generate_content(
-            model=config.IMAGE_MODEL, contents=[facade, instruction]
-        )
-        for part in resp.candidates[0].content.parts:
-            if getattr(part, "inline_data", None) and part.inline_data.data:
-                return Image.open(io.BytesIO(part.inline_data.data)).convert("RGB")
-        log.warning("No image returned for concept '%s'", variant.concept_name)
-    except Exception as exc:
-        log.warning("Failed to render concept '%s': %s", variant.concept_name, exc)
-    return None
+    return gemini.edit_image(client, facade, instruction,
+                             label=f"concept '{variant.concept_name}'")
 
 
 def render_all_variants(facade: Image.Image, concepts: RenovationConcepts,

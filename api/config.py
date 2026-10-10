@@ -76,9 +76,22 @@ ALLOWED_ORIGINS: List[str] = [
 # Attachments are re-encoded to JPEG before storage, so these bound the *input*.
 # UPLOAD_MAX_EDGE also bounds what the vision model is billed for: a 4032px
 # phone photo costs the same to analyse as a 1600px one, and reads no better.
-MAX_UPLOAD_IMAGES: int = int(_env("MAX_UPLOAD_IMAGES", "6"))
+#
+# MAX_PHOTOS replaced MAX_UPLOAD_IMAGES when the limit went from 6 to 50. The
+# old variable is deliberately ignored: deployments set it to 6 when 6 was the
+# product, and honouring it would silently keep them there.
+MAX_UPLOAD_IMAGES: int = int(_env("MAX_PHOTOS", "50"))
 MAX_UPLOAD_MB: float = float(_env("MAX_UPLOAD_MB", "12"))
 UPLOAD_MAX_EDGE: int = int(_env("UPLOAD_MAX_EDGE", "1600"))
+
+# ── After the scan ───────────────────────────────────────────────────────────
+# Questions and studio renders are included with a scan, up to these caps, so
+# one credit cannot turn into an unbounded model bill.
+ASK_LIMIT_PER_SCAN: int = int(_env("ASK_LIMIT_PER_SCAN", "40"))
+RENDER_LIMIT_PER_SCAN: int = int(_env("RENDER_LIMIT_PER_SCAN", "12"))
+# Service-wide, so a burst of users cannot exhaust the image quota.
+MAX_CONCURRENT_RENDERS: int = int(_env("MAX_CONCURRENT_RENDERS", "3"))
+MAX_CONCURRENT_ASKS: int = int(_env("MAX_CONCURRENT_ASKS", "4"))
 
 # ── Billing ──────────────────────────────────────────────────────────────────
 CREDIT_COST: int = int(_env("SCAN_CREDIT_COST", "1"))

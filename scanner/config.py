@@ -47,8 +47,28 @@ RENOVATION_TIERS: List[Tuple[str, str]] = [
                            "feature glazing, integrated lighting design, full landscape redesign."),
 ]
 
-# Wall-clock ceiling for a single scan, enforced by the API worker.
-SCAN_TIMEOUT_SECONDS: int = int(_env("SCANNER_TIMEOUT_SECONDS", "900"))
+# Wall-clock ceiling for a single scan, enforced by the API worker. A 50-photo
+# inspection is a few hundred model calls' worth of work, so this is generous.
+SCAN_TIMEOUT_SECONDS: int = int(_env("SCANNER_TIMEOUT_SECONDS", "1200"))
+
+# ── Photo inspection ─────────────────────────────────────────────────────────
+# Every photograph is inspected on its own call, because bounding boxes are
+# only tight when the model is looking at one picture. This many run at once;
+# it is really a rate limit on the Gemini quota.
+VISION_CONCURRENCY: int = max(1, int(_env("SCANNER_VISION_CONCURRENCY", "6")))
+
+# Per-request ceiling on any single Gemini call, seconds. Retries sit on top.
+GEMINI_TIMEOUT_SECONDS: int = int(_env("SCANNER_GEMINI_TIMEOUT_SECONDS", "180"))
+GEMINI_ATTEMPTS: int = max(1, int(_env("SCANNER_GEMINI_ATTEMPTS", "3")))
+
+# ── Optional stages ──────────────────────────────────────────────────────────
+# Google Solar API: real roof geometry and a panel layout. Needs "Solar API"
+# enabled on the Maps key's project; without it the stage logs once and skips.
+ENABLE_SOLAR: bool = _flag("SCANNER_ENABLE_SOLAR", True)
+# Interior redesign renders made during the scan (on-demand ones are separate).
+ENABLE_MAKEOVERS: bool = _flag("SCANNER_ENABLE_MAKEOVERS", True)
+MAKEOVER_COUNT: int = max(0, int(_env("SCANNER_MAKEOVER_COUNT", "3")))
+ENABLE_LISTING: bool = _flag("SCANNER_ENABLE_LISTING", True)
 
 
 def require_keys() -> None:

@@ -14,7 +14,7 @@ import asyncio
 import logging
 from typing import List, Optional, Set
 
-from scanner import ScanFailed, run_scan
+from scanner import ScanFailed, ScanOptions, run_scan
 from scanner.config import SCAN_TIMEOUT_SECONDS
 
 from . import config, db, storage
@@ -31,9 +31,12 @@ def init() -> None:
 
 
 def submit(scan_id: str, user_id: str, address: str,
-           owner_photos: Optional[List[str]] = None) -> None:
+           owner_photos: Optional[List[str]] = None,
+           goal: Optional[str] = None, style: Optional[str] = None) -> None:
     """Kick off a scan. Returns as soon as the task is scheduled."""
-    task = asyncio.create_task(_run(scan_id, user_id, address, owner_photos or []))
+    task = asyncio.create_task(
+        _run(scan_id, user_id, address, owner_photos or [], goal, style)
+    )
     # Without a strong reference the event loop may garbage-collect the task
     # mid-flight.
     _tasks.add(task)
@@ -50,7 +53,8 @@ async def shutdown(grace_seconds: float = 5.0) -> None:
 
 
 async def _run(scan_id: str, user_id: str, address: str,
-               owner_photos: List[str]) -> None:
+               owner_photos: List[str], goal: Optional[str] = None,
+               style: Optional[str] = None) -> None:
     assert _semaphore is not None, "worker.init() was not called"
 
     loop = asyncio.get_running_loop()
@@ -60,12 +64,23 @@ async def _run(scan_id: str, user_id: str, address: str,
         # Fire-and-forget: a dropped progress update must never fail the scan.
         asyncio.run_coroutine_threadsafe(_safe_stage(scan_id, stage, detail), loop)
 
+    def on_live(state: dict) -> None:
+        # Same hop for the per-photo feed. Versioned in the DB, so updates that
+        # land out of order cannot roll the feed backwards.
+        asyncio.run_coroutine_threadsafe(_safe_live(scan_id, state), loop)
+
+    options = ScanOptions(on_live=on_live)
+    if goal:
+        options.goal = goal
+    if style:
+        options.style = style
+
     async with _semaphore:
         try:
             await db.mark_running(scan_id)
             payload = await asyncio.wait_for(
                 asyncio.to_thread(run_scan, address, storage.scan_dir(scan_id),
-                                  on_progress, owner_photos),
+                                  on_progress, owner_photos, options),
                 timeout=SCAN_TIMEOUT_SECONDS,
             )
             await db.mark_completed(scan_id, payload)
@@ -100,3 +115,10 @@ async def _safe_stage(scan_id: str, stage: str, detail: str) -> None:
         await db.set_stage(scan_id, stage, detail)
     except Exception as exc:
         log.debug("Progress update dropped for %s: %s", scan_id, exc)
+
+
+async def _safe_live(scan_id: str, state: dict) -> None:
+    try:
+        await db.set_live(scan_id, state)
+    except Exception as exc:
+        log.debug("Live update dropped for %s: %s", scan_id, exc)

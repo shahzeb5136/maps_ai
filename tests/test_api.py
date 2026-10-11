@@ -222,3 +222,51 @@ def test_failed_renders_hit_a_hard_ceiling(api, monkeypatch):
 def test_signed_urls_are_stable_within_the_hour(api):
     from api import storage
     assert storage.sign("abc", "x.jpg") == storage.sign("abc", "x.jpg")
+
+
+def test_owner_marks_an_issue_not_an_issue(api):
+    """Dismissing takes the issue out of the score and the PDF; restoring puts it back."""
+    files = [("images", (f"IMG_{i}.jpg", _jpeg(i), "image/jpeg")) for i in range(1, 5)]
+    sid = api.post("/api/scans", data={"address": "1 Test Street"}, files=files).json()["scan"]["id"]
+    before = _wait(api, sid)["result"]
+    critical = next(i for i in before["inspection_report"]["issues"] if i["severity"] == "critical")
+    assert before["health"]["capped_by_critical"] is True
+
+    res = api.post(f"/api/scans/{sid}/issues/{critical['id']}", json={"dismissed": True})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["dismissed_ids"] == [critical["id"]]
+    assert body["health"]["capped_by_critical"] is False
+    assert body["health"]["counts"]["critical"] == 0
+    assert body["health"]["score"] > before["health"]["score"]
+    assert "report_r1.pdf" in body["pdf_url"] and body["version"] == 1
+    assert api.get(_local(body["pdf_url"])).headers["content-type"] == "application/pdf"
+
+    # It sticks: a fresh read of the scan carries the correction.
+    after = api.get(f"/api/scans/{sid}").json()["result"]
+    flagged = next(i for i in after["inspection_report"]["issues"] if i["id"] == critical["id"])
+    assert flagged["dismissed_by_user"] is True
+    assert after["health"]["score"] == body["health"]["score"]
+
+    restored = api.post(f"/api/scans/{sid}/issues/{critical['id']}", json={"dismissed": False}).json()
+    assert restored["dismissed_ids"] == []
+    assert restored["health"]["score"] == before["health"]["score"]
+    assert "report_r2.pdf" in restored["pdf_url"] and restored["version"] == 2
+    # The superseded PDF is gone; the original from the scan itself is kept.
+    assert api.get(_local(body["pdf_url"])).status_code == 404
+    assert api.post(f"/api/scans/{sid}/issues/I99", json={"dismissed": True}).status_code == 404
+
+
+def test_dismissing_every_issue_still_builds_the_report(api):
+    """An empty register, an empty plan and the summary note must all still render."""
+    files = [("images", (f"IMG_{i}.jpg", _jpeg(i), "image/jpeg")) for i in range(1, 4)]
+    sid = api.post("/api/scans", data={"address": "2 Test Street"}, files=files).json()["scan"]["id"]
+    issues = _wait(api, sid)["result"]["inspection_report"]["issues"]
+    assert issues
+
+    for n, issue in enumerate(issues, start=1):
+        body = api.post(f"/api/scans/{sid}/issues/{issue['id']}", json={"dismissed": True}).json()
+        assert f"report_r{n}.pdf" in body["pdf_url"], body["pdf_url"]
+    assert sorted(body["dismissed_ids"]) == sorted(i["id"] for i in issues)
+    assert sum(body["health"]["counts"].values()) == 0
+    assert api.get(_local(body["pdf_url"])).headers["content-type"] == "application/pdf"

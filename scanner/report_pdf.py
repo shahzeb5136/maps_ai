@@ -599,6 +599,17 @@ def _renovation(payload: dict, base: Path) -> List:
 
 
 # ── Inspection layer (version 2 payloads) ──────────────────────────────────
+def _issues(payload: dict) -> List[dict]:
+    """The issues still standing: the owner can mark one "not an issue"."""
+    return [i for i in (payload.get("inspection_report") or {}).get("issues") or []
+            if not i.get("dismissed_by_user")]
+
+
+def _dismissed(payload: dict) -> List[dict]:
+    return [i for i in (payload.get("inspection_report") or {}).get("issues") or []
+            if i.get("dismissed_by_user")]
+
+
 ORANGE = colors.HexColor("#c2410c")
 SEV_COLOR = {"critical": NEG, "major": ORANGE, "minor": WARN, "cosmetic": INK_3}
 SEV_LABEL = {"critical": "CRITICAL", "major": "MAJOR", "minor": "MINOR", "cosmetic": "COSMETIC"}
@@ -662,7 +673,7 @@ def _cover_v2(payload: dict, base: Path) -> List:
     kpis = [
         ("HEALTH SCORE" + (" (PROVISIONAL)" if health.get("provisional") else ""), score_text,
          _score_color(score)),
-        ("ISSUES FOUND", str(len(report.get("issues") or [])), INK),
+        ("ISSUES FOUND", str(len(_issues(payload))), INK),
         ("CRITICAL", str(urgent), NEG if urgent else POS),
         ("SYSTEMS ASSESSED",
          f"{health.get('systems_assessed', 0)} of {health.get('systems_total', 12)}", INK),
@@ -691,6 +702,14 @@ def _cover_v2(payload: dict, base: Path) -> List:
             body.append(_raw(f"<b>{escape(report['verdict'])}</b>", "body"))
         if report.get("executive_summary"):
             body.append(_p(report["executive_summary"], "body"))
+        dismissed = _dismissed(payload)
+        if dismissed:
+            # The summary is the model's, written before the owner's corrections;
+            # say so rather than let it contradict the register.
+            n = len(dismissed)
+            body.append(_p(f"Written before the owner marked {n} item{'' if n == 1 else 's'} "
+                           "not an issue. The score, register and action plan in this report "
+                           "reflect those corrections.", "small"))
         flow += [_callout(body), Spacer(1, 10)]
 
     if health.get("provisional"):
@@ -775,11 +794,19 @@ def _inspection_summary(payload: dict) -> List:
 
 
 def _register(payload: dict, base: Path) -> List:
-    report = payload.get("inspection_report") or {}
-    issues = report.get("issues") or []
+    issues = _issues(payload)
+    dismissed = _dismissed(payload)
     if not payload.get("health"):
         return []
     flow = _section("Defect Register")
+    if dismissed:
+        flow += [_p("Marked not an issue by the owner, and left out of this register, the "
+                    "action plan and the score: "
+                    + "; ".join(f"{i['id']} {i['title']}" for i in dismissed) + ".", "small"),
+                 Spacer(1, 8)]
+    if not issues and dismissed:
+        return flow + [_p("Every defect the inspection found has been marked not an issue by "
+                          "the owner (listed above).", "body")]
     if not issues:
         return flow + [_p("No defects were found in the photographs supplied. That is a "
                           "statement about what was photographed, not a clean bill of "
@@ -820,7 +847,7 @@ def _register(payload: dict, base: Path) -> List:
 
 
 def _action_plan(payload: dict) -> List:
-    issues = (payload.get("inspection_report") or {}).get("issues") or []
+    issues = _issues(payload)
     if not issues:
         return []
     flow = _section("Action Plan")
@@ -893,8 +920,10 @@ def _spaces(payload: dict, base: Path) -> List:
     if not spaces or not photos:
         return []
     annotated = payload.get("annotated") or {}
+    standing = {i["id"] for i in _issues(payload)}
     flow = _section("Rooms & Photo Log")
     for sp in spaces:
+        sp = {**sp, "issues": [i for i in sp.get("issues") or [] if i in standing]}
         entries = []
         for label in sp["photos"]:
             p = photos.get(label)

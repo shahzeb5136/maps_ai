@@ -304,6 +304,15 @@ async def mark_completed(scan_id: str, result: Dict[str, Any]) -> None:
     )
 
 
+async def save_result(scan_id: str, user_id: str, result: Dict[str, Any]) -> None:
+    """Replace a completed scan's result (after the owner corrects it)."""
+    await pool().execute(
+        "UPDATE property_scans SET result_json = $3::jsonb "
+        "WHERE id = $1 AND user_id = $2 AND status = $4",
+        scan_id, user_id, _dumps(result), COMPLETED,
+    )
+
+
 async def mark_failed(scan_id: str, message: str) -> None:
     await pool().execute(
         """

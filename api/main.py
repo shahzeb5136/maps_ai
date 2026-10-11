@@ -17,6 +17,8 @@ Endpoints (all but /health and the signed file route require a Clerk bearer toke
     POST   /api/scans/{id}/renders  {source, mode, style?, instruction?}
                                                 render one photo in the studio
     GET    /api/scans/{id}/renders              the scan's studio renders
+    POST   /api/scans/{id}/issues/{issue}  {dismissed}
+                                                mark an issue "not an issue", or restore it
 """
 
 import asyncio
@@ -38,7 +40,7 @@ from pydantic import BaseModel
 
 from scanner import ask as ask_stage
 from scanner import config as scanner_config
-from scanner import makeovers
+from scanner import makeovers, overrides
 from scanner.analysis import make_client
 from scanner.photos import DEFAULT_GOAL, GOALS
 
@@ -689,3 +691,47 @@ async def create_render(scan_id: str, body: RenderBody, user_id: str = Depends(c
         # The scan was deleted while the render was being made.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Scan not found.")
     return _render_out(row)
+
+
+# ── The owner's corrections ─────────────────────────────────────────────────
+# An issue the owner marks "not an issue" stops counting in the score, the
+# action plan and the PDF; restoring it puts it back. One correction at a
+# time per scan, so two quick clicks cannot both read the same payload and
+# the second overwrite the first.
+_correction_locks: Dict[str, asyncio.Lock] = {}
+
+
+class IssueBody(BaseModel):
+    dismissed: bool = True
+
+
+@app.post("/api/scans/{scan_id}/issues/{issue_id}")
+async def set_issue(scan_id: str, issue_id: str, body: IssueBody,
+                    user_id: str = Depends(current_user)):
+    lock = _correction_locks.setdefault(scan_id, asyncio.Lock())
+    async with lock:
+        payload = await _completed_scan(scan_id, user_id)
+        if not overrides.set_dismissed(payload, issue_id, body.dismissed):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such issue on this scan.")
+
+        issue = next(i for i in payload["inspection_report"]["issues"] if i["id"] == issue_id)
+        # The PDF is rebuilt now rather than lazily, so the download link the
+        # page holds always matches what the page shows. A failed rebuild keeps
+        # the previous PDF: the correction itself still stands.
+        pdf = await asyncio.to_thread(overrides.rebuild_pdf, payload,
+                                      storage.scan_dir(scan_id), set(issue["photos"]))
+        if pdf:
+            payload["pdf"] = pdf
+        await db.save_result(scan_id, user_id, payload)
+
+    signed = storage.sign_payload(scan_id, payload)
+    return {
+        "issue_id": issue_id,
+        "dismissed": body.dismissed,
+        "dismissed_ids": overrides.dismissed_ids(payload),
+        "health": payload["health"],
+        "pdf_url": signed.get("pdf_url"),
+        # Increases with every correction, so a client with two in flight
+        # can tell which reply is the newer state.
+        "version": payload["overrides_version"],
+    }

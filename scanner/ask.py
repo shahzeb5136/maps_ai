@@ -53,7 +53,10 @@ def _context(payload: dict) -> str:
             for p in photos if not p.get("error")
         ],
         "issues": [{"id": i["id"], "title": i["title"], "severity": i["severity"],
-                    "urgency": i["urgency"], "trade": i["trade"], "photos": i["photos"]}
+                    "urgency": i["urgency"], "trade": i["trade"], "photos": i["photos"],
+                    # The owner has said this is not a problem for them; answer
+                    # accordingly, but do not pretend it is not in the photo.
+                    **({"owner_marked_not_an_issue": True} if i.get("dismissed_by_user") else {})}
                    for i in inspection.get("issues", [])],
         "health_score": health.get("score"),
         "equipment": [{"kind": e["kind"], "brand": e["brand"], "model": e["model"],
